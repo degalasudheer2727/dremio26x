@@ -1,44 +1,41 @@
 # =============================================================================
-# Dremio 26 - COMMON base values (shared by dev / qa / prod)
+# Dremio 26 (v3 chart) — COMMON overrides (shared by dev / qa / prod)
 # =============================================================================
-# Chart: oci://quay.io/dremio/dremio-helm  (Dremio 26+ "v3" chart)
-#
-# This file holds settings that are IDENTICAL across every environment. Each
-# environment then layers its own overlay ON TOP of this file. Helm merges
-# multiple --values files left-to-right, so the install command is always:
+# Layered AFTER values-openshift-overrides.yaml and BEFORE the per-env file:
 #
 #   helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
-#       --version <CHART_VERSION> \
-#       --namespace <ns> \
-#       --values helm/values-common.yaml \
-#       --values helm/values-<env>.yaml
+#     --version 3.2.3 \
+#     -f helm/values-openshift-overrides.yaml \
+#     -f helm/values-common.yaml \
+#     -f helm/values-<env>.yaml --wait
 #
-# (The scripts/Makefile do this for you via ENV=dev|qa|prod.)
-#
-# ⚠️ Reconcile key names against your exact chart version:
-#   helm show values oci://quay.io/dremio/dremio-helm --version <v> \
-#       > helm/values-reference.generated.yaml
+# NOTE ON VERSIONS: the Helm CHART version is semver 3.x.x (e.g. 3.2.3); the
+# Dremio APP/image version is 26.x.x (e.g. 26.1.3). Do not confuse the two.
 # =============================================================================
 
-# Pin an explicit X.Y.Z image tag in EVERY environment (set per-env so dev can
-# trail prod). NEVER use "latest"/"X.Y".
-image:
-  pullPolicy: IfNotPresent
+# Enterprise image is the chart default (quay.io/dremio/dremio-enterprise).
+# Pull it with a Quay pull secret created per the install guide.
+imagePullSecrets:
+  - name: dremio-pull-secret
 
-# Use the dedicated ServiceAccount (openshift/02-serviceaccount.yaml) so the
-# custom SCC (fixed UID 999) applies. Same in all environments.
-serviceAccount: "dremio"
+dremio:
+  # Paste your Enterprise license key, or load it from a Secret via --set-file.
+  license: ""
+  image:
+    repository: quay.io/dremio/dremio-enterprise
+    tag: "26.1.3"            # APP version — verify against your chart version
+    pullPolicy: IfNotPresent
 
-# Web UI / client / flight ports are the same everywhere; TLS is toggled per-env.
-coordinator:
-  web:
-    port: 9047
-  client:
-    port: 31010
-  flight:
-    port: 32010
-  # Do NOT set runAsUser/fsGroup on OpenShift — the SCC injects UID/GID 999.
+# Kubernetes service DNS suffix. Leave as cluster.local unless your OpenShift
+# cluster uses a custom domain.
+cluster:
+  domain: cluster.local
 
-executor:
-  engines:
-    - "default"
+# The chart default service type is LoadBalancer. On OpenShift we expose the UI
+# via a Route (openshift/03-route-ui.yaml), so use ClusterIP and avoid
+# provisioning a cloud load balancer (which often stays <pending> on-prem).
+service:
+  type: ClusterIP
+
+# The v3 chart REQUIRES object storage for distStorage — there is no "local"
+# option. Each environment sets its own bucket/credentials (see values-<env>.yaml).

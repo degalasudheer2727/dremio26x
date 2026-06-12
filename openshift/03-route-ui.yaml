@@ -4,19 +4,18 @@
 # OpenShift uses "Route" objects instead of Kubernetes Ingress to expose
 # services on a public hostname. This Route exposes the Dremio web UI.
 #
-# IMPORTANT: the `to.name` below must match the name of the Service that the
-# Helm chart creates for the coordinator/client. After `helm install`, run:
-#     oc get svc -n dremio
-# and confirm the client service name. With the v3 chart the client service is
-# typically named "dremio-client". Adjust `to.name` if yours differs.
+# The v3 chart creates a Service named "dremio-client" with named ports
+# web (9047), client (31010) and flight (32010) — verified against the chart.
+# This Route targets the "web" port. Confirm the service exists after install:
+#     oc get svc dremio-client -n dremio
 #
 # This Route terminates TLS at the OpenShift router (edge) and redirects HTTP
-# to HTTPS. Dremio inside the cluster keeps speaking plain HTTP on 9047, which
-# keeps the minimal setup simple. For end-to-end TLS, switch to passthrough/
-# reencrypt and enable TLS in the Helm values (see helm/values-openshift-minimal.yaml).
+# to HTTPS. Dremio inside the cluster keeps speaking plain HTTP on 9047 (dev).
+# For end-to-end TLS, set coordinator.web.tls.enabled=true in the env values
+# (qa/prod do this) and switch this Route's termination to "reencrypt".
 #
 # Apply with:
-#   oc apply -f openshift/05-route-ui.yaml
+#   oc apply -f openshift/03-route-ui.yaml
 #
 # Then get the URL with:
 #   oc get route dremio-ui -n dremio -o jsonpath='{.spec.host}{"\n"}'

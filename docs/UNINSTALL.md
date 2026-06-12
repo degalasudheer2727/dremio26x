@@ -1,68 +1,57 @@
-# Uninstall & Upgrade
+# Uninstall & Upgrade (Dremio 26 v3 chart)
 
-## Uninstall — keep my data
+## Uninstall — keep data
 
-Removes the running workloads and Routes but **keeps PersistentVolumeClaims**
-and the namespace, so a later reinstall keeps your sources, spaces, and
-reflections:
-
-```bash
-./scripts/uninstall.sh
-```
-
-Equivalent manual steps:
+Removes workloads, Services, and the chart-created RoleBindings/ServiceAccounts,
+but keeps PVCs (coordinator metadata, MongoDB, OpenSearch) and the namespace:
 
 ```bash
-oc delete -f openshift/05-route-ui.yaml --ignore-not-found
-oc delete -f openshift/06-route-flight.yaml --ignore-not-found
-helm uninstall dremio -n dremio
+ENV=dev ./scripts/uninstall.sh
+# equivalent:
+oc delete route dremio-ui dremio-flight -n dremio-dev --ignore-not-found
+helm uninstall dremio -n dremio-dev
 ```
 
-> `helm uninstall` deletes the StatefulSets but, by design, leaves the PVCs that
-> StatefulSets created. Your data survives.
+Helm leaves PVCs and **CRDs** behind by design. The cluster-wide Tuned CR is
+shared across environments — leave it unless no Dremio env remains.
 
 ## Uninstall — delete everything (DATA LOSS)
 
-Also deletes PVCs, RBAC, the SCC, the ServiceAccount and the namespace:
-
 ```bash
-PURGE=1 ./scripts/uninstall.sh
+PURGE=1 ENV=dev ./scripts/uninstall.sh
+# also removes PVCs (incl. MongoDB catalog metadata + OpenSearch) and the namespace
 ```
 
-Equivalent manual steps:
+CRDs are cluster-scoped and shared; remove them **only** when no Dremio install
+remains anywhere (see [RUNBOOK.md](RUNBOOK.md) B8) — deleting a CRD
+cascade-deletes its custom resources.
 
-```bash
-helm uninstall dremio -n dremio
-oc delete pvc --all -n dremio            # irreversible
-oc delete -f openshift/04-rbac.yaml --ignore-not-found
-oc delete -f openshift/03-scc.yaml --ignore-not-found   # needs cluster-admin
-oc delete -f openshift/02-serviceaccount.yaml --ignore-not-found
-oc delete -f openshift/01-namespace.yaml --ignore-not-found
-```
+## Upgrade Dremio (chart 3.x → 3.y)
 
-## Upgrade Dremio (e.g. 26.0.0 → 26.x.y)
+1. **Back up** the coordinator metadata PVC, the MongoDB catalog data, and the
+   distributed/catalog object storage.
+2. Read Dremio's upgrade notes; metadata migrations may run on first start and
+   are typically **one-way**.
+3. **Upgrade CRDs first** if the new chart ships changes (Helm won't):
+   ```bash
+   helm pull oci://quay.io/dremio/dremio-helm --version 3.3.0 --untar -d /tmp/dnew
+   oc apply -f /tmp/dnew/*/crds/ 2>/dev/null || true   # cluster-admin
+   ```
+4. Re-run the layered upgrade with the new chart version and matching app tag:
+   ```bash
+   # bump dremio.image.tag in helm/values-common.yaml to the new 26.x, then:
+   helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
+     --version 3.3.0 \
+     -n dremio-prod \
+     -f helm/values-openshift-overrides.yaml \
+     -f helm/values-common.yaml \
+     -f helm/values-prod.yaml \
+     --skip-crds --wait --timeout 30m
+   ```
+5. Watch the coordinator finish metadata migration:
+   ```bash
+   oc logs -f dremio-master-0 -n dremio-prod
+   ```
 
-1. **Back up** the coordinator metadata PVC and your distributed storage first.
-2. Read Dremio’s official upgrade notes for the target version (metadata
-   migrations may run on first start and can be one-way).
-3. Bump **both** the image tag and the chart version, then re-run the same
-   idempotent command you used to install:
-
-```bash
-# edit helm/values-openshift-minimal.yaml -> image.tag: "26.x.y"
-
-helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
-  --version 26.x.y \
-  --namespace dremio \
-  --values helm/values-openshift-minimal.yaml \
-  --wait --timeout 20m
-```
-
-4. Watch the master come up and confirm metadata migration completed:
-
-```bash
-oc logs -f dremio-master-0 -n dremio
-```
-
-> Roll forward, not back: once the coordinator upgrades its metadata store you
-> generally **cannot** downgrade. That is why step 1 (backup) is mandatory.
+> Roll forward, not back: once metadata is upgraded you generally cannot
+> downgrade — hence the mandatory backup in step 1.

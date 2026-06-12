@@ -1,64 +1,80 @@
-# Prerequisites & Sizing
-
-A consolidated checklist. The install guide ([00-INSTALL-OPENSHIFT.md](00-INSTALL-OPENSHIFT.md))
-references this.
+# Prerequisites & Sizing (Dremio 26 v3 chart)
 
 ## Workstation tools
 
-| Tool   | Version | Notes |
-|--------|---------|-------|
-| `oc`   | 4.x, matching your cluster | Download from the OpenShift console → *Command line tools*. |
-| `helm` | **≥ 3.8** | OCI (`oci://`) support is mandatory for the Dremio 26 v3 chart. |
-| `git`  | any     | To clone this repo. |
+| Tool | Version | Notes |
+|------|---------|-------|
+| `oc` | matches cluster | OpenShift CLI |
+| `helm` | **≥ 3.8** | OCI (`oci://`) chart support (mandatory) |
+| `git` | any | clone this repo |
 
-Verify:
 ```bash
-oc version --client
-helm version
+oc version --client && helm version
 ```
 
 ## Cluster requirements
 
-- **OpenShift 4.x** with the default OpenShift router (for Routes).
-- **cluster-admin** access **once**, to create the `SecurityContextConstraints`
-  object (`openshift/03-scc.yaml`). Namespaced objects can be applied by a
-  project admin afterward.
-- A **dynamic StorageClass** providing `ReadWriteOnce` volumes. List with:
-  ```bash
-  oc get storageclass
-  ```
-  If `distStorage` is run with multiple replicas you may need `ReadWriteMany`.
-- **Egress to `quay.io`**:
-  - from the machine running `helm` → to pull the **chart**;
-  - from the cluster nodes → to pull the **container images**
-    (`docker.io/dremio/dremio-oss` for OSS, `quay.io/dremio/dremio-enterprise`
-    for Enterprise).
-  - Air-gapped? Mirror the chart and images into your internal registry and
-    update `image.registry`/`image.repository` + the `helm` chart reference.
+- **OpenShift 4.x** with the default router (Routes) and built-in `nonroot` /
+  `nonroot-v2` SCCs (present by default).
+- **cluster-admin once** to apply the OpenSearch **Tuned CR**
+  (`openshift/02-node-tuning-opensearch.yaml`). CRDs (engine/MongoDB/OpenSearch
+  operators) are also cluster-scoped — Helm installs them, but creating/upgrading
+  them needs admin. See [RUNBOOK.md](RUNBOOK.md).
+- **Permission to create RoleBindings** in your project (so `useOpenShiftRoles`
+  can bind the SCCs).
+- **Dynamic StorageClass** (`ReadWriteOnce`, expandable). `oc get storageclass`.
+  Prod: SSD for data, **NVMe for C3/spill**.
+- **Object storage** (S3 / ADLS Gen2 / GCS, or S3-compatible like MinIO) for
+  distributed storage **and** a separate Iceberg catalog location. There is **no
+  local-PVC dist storage** in v3.
+- **Quay.io egress** (chart + Enterprise images), or a mirror for air-gapped.
 
-## Minimal resource footprint
+## Editions / images
 
-The values in `helm/values-openshift-minimal.yaml` request approximately:
+The chart defaults to the **Enterprise** image
+(`quay.io/dremio/dremio-enterprise:26.x`), which needs a **license** and a
+**pull secret** (`dremio-pull-secret`). Companion images (busybox, utils,
+catalog, MongoDB/Percona, OpenSearch, NATS, OTel) are also pulled from quay.
 
-| Component   | Replicas | CPU each | Mem each | Disk each |
-|-------------|----------|----------|----------|-----------|
-| Coordinator | 1        | 2        | 8 Gi     | 32 Gi     |
-| Executor    | 1        | 2        | 8 Gi     | 32 Gi     |
-| ZooKeeper   | 1        | 0.5      | 1 Gi     | 8 Gi      |
-| Dist (local)| 1 PVC    | –        | –        | 64 Gi     |
+```bash
+oc create secret docker-registry dremio-pull-secret \
+  --docker-server=quay.io --docker-username='<user>' --docker-password='<token>' \
+  -n <namespace>
+```
 
-**Cluster total (roughly):** ~4.5 CPU, ~17 Gi RAM schedulable, ~136 Gi storage.
+## OpenSearch node tuning (required)
 
-> These are dev/POC sizes. Dremio’s recommended production executor is far
-> larger (commonly 15 CPU / ~120 Gi). Raise `cpu`/`memory`/`volumeSize` in the
-> values before any serious workload.
+The OpenShift overrides disable the privileged init container, so nodes must set
+`vm.max_map_count=262144` via the Node Tuning Operator:
 
-## Editions
+```bash
+oc apply -f openshift/02-node-tuning-opensearch.yaml
+```
 
-| Edition | Image | License | Helm chart |
-|---------|-------|---------|------------|
-| Community/OSS | `docker.io/dremio/dremio-oss:26.x` | none | same v3 chart |
-| Enterprise    | `quay.io/dremio/dremio-enterprise:26.x` | required + pull secret | same v3 chart |
+## Minimal (dev) footprint
 
-This project defaults to **OSS** so you can deploy with no license. Switch the
-`image` block and add a pull secret (install guide Step 5) for Enterprise.
+`values-dev.yaml` shrinks every component to single replicas:
+
+| Component | Replicas | CPU | Mem | Disk |
+|-----------|----------|-----|-----|------|
+| Coordinator | 1 | 2 | 8 Gi | 32 Gi |
+| Executor | 1 | 2 | 8 Gi | 32 Gi |
+| ZooKeeper | 1 | 0.5 | 1 Gi | 8 Gi |
+| Catalog / Catalog svc | 1 / 1 | 1 / 1 | 2 / 2 Gi | – |
+| MongoDB | 1 | 0.5–1 | 1 Gi | 32 Gi |
+| OpenSearch | 1 | 1 | 4 Gi | 32 Gi |
+| NATS | 1 | 0.5 | 1 Gi | 2 Gi |
+
+Even "minimal" Dremio 26 needs **~10+ CPU and ~30+ Gi RAM** schedulable plus
+object storage — it is a platform, not a single pod.
+
+## Production sizing (Dremio recommendations)
+
+| Component | Size | Instance hint |
+|-----------|------|---------------|
+| Coordinator | 32 vCPU / 64 Gi | c6i.8xlarge · Standard_F32s_v2 |
+| Executor | 16 vCPU / 128 Gi (1:8) or 32/128 (1:4) | memory-optimized |
+| Storage | gp3/io2 · managed-premium · pd-ssd; **NVMe for C3 + spill** | |
+
+3-node ZooKeeper / MongoDB / OpenSearch; MongoDB backup + PITR; catalog replicas
+≥ 2; dedicated node pools. See [ENVIRONMENTS.md](ENVIRONMENTS.md).

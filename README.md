@@ -1,128 +1,130 @@
-# dremio26x — Dremio 26 Minimal Deployment on OpenShift (Helm v3 chart)
+# dremio26x — Dremio 26 on OpenShift (official v3 Helm chart)
 
-A complete, ready-to-run project for deploying a **minimal Dremio 26** cluster on
-**Red Hat OpenShift** using the **official Dremio Helm v3 chart**
-(`oci://quay.io/dremio/dremio-helm`) plus the OpenShift-specific objects
-(ServiceAccount, SCC, RBAC, Routes) that Dremio needs to run there.
+A complete, ready-to-run project for deploying **Dremio 26** on **Red Hat
+OpenShift** the way **Dremio's official guide** prescribes: the **v3 Helm chart**
+(`oci://quay.io/dremio/dremio-helm`) installed with Dremio's **two-file overrides**
+pattern and **`useOpenShiftRoles`** (so the chart wires up the OpenShift SCCs),
+with dev / qa / prod environment overlays.
 
 > **New here? Go straight to the spoon-fed, step-by-step guide:**
 > 👉 **[docs/00-INSTALL-OPENSHIFT.md](docs/00-INSTALL-OPENSHIFT.md)**
 
 ---
 
-## TL;DR — install in three commands
+## TL;DR
 
 ```bash
-# 0. clone, then from the repo root:
-./scripts/preflight.sh                              # check you're ready
-oc apply -f openshift/                              # namespace, SA, SCC, RBAC (SCC needs cluster-admin)
-DREMIO_CHART_VERSION=26.0.0 ./scripts/install.sh    # helm install + expose UI Route
+# from the repo root, logged into OpenShift:
+ENV=dev ./scripts/preflight.sh                       # check readiness
+
+# one-time, cluster-admin: OpenSearch node tuning
+oc apply -f openshift/02-node-tuning-opensearch.yaml
+
+# create the Enterprise pull secret in the namespace
+oc create secret docker-registry dremio-pull-secret \
+  --docker-server=quay.io --docker-username='<user>' --docker-password='<token>' \
+  -n dremio-dev
+
+# install (layered overrides, official two-file pattern + our env overlay)
+ENV=dev CHART_VERSION=3.2.3 ./scripts/install.sh
 ```
 
-Then open the printed `https://…` URL and create the admin account on first
-login.
+Then open the printed `https://…` URL and create the admin account.
 
-> Prefer doing it by hand to understand each step? Follow
-> [docs/00-INSTALL-OPENSHIFT.md](docs/00-INSTALL-OPENSHIFT.md) instead — the
-> script just runs those same commands.
+> **Versions:** Helm **chart** = `3.x.x` (e.g. `3.2.3`); Dremio **app/image** =
+> `26.x.x` (e.g. `26.1.3`). Don't confuse them — `--version` takes the chart's.
 
 ---
 
-## What’s in this repo
+## What's in this repo
 
 ```
 dremio26x/
-├── README.md                          ← you are here
-├── Makefile                           ← convenience targets (make help, ENV=dev|qa|prod)
+├── README.md                            ← you are here
+├── Makefile                             ← make help, ENV=dev|qa|prod
 ├── docs/
-│   ├── 00-INSTALL-OPENSHIFT.md        ← MAIN spoon-fed install guide
-│   ├── RUNBOOK.md                     ← SCC + CRD execution runbook (admin ops)
-│   ├── ENVIRONMENTS.md                ← dev/qa/prod values design + comparison
-│   ├── PREREQUISITES.md               ← tools, cluster reqs, sizing, editions
-│   ├── ARCHITECTURE.md                ← components, diagrams, design rationale
-│   ├── TROUBLESHOOTING.md             ← symptom → fix playbook
-│   └── UNINSTALL.md                   ← teardown + upgrade procedure
+│   ├── 00-INSTALL-OPENSHIFT.md          ← MAIN spoon-fed install guide
+│   ├── RUNBOOK.md                       ← SCC (useOpenShiftRoles) + CRD/operator runbook
+│   ├── ENVIRONMENTS.md                  ← dev/qa/prod values design + comparison
+│   ├── PREREQUISITES.md                 ← tools, cluster reqs, sizing, editions
+│   ├── ARCHITECTURE.md                  ← v3 platform components + rationale
+│   ├── TROUBLESHOOTING.md               ← symptom → fix playbook
+│   └── UNINSTALL.md                     ← teardown + upgrade procedure
 ├── helm/
-│   ├── values-common.yaml             ← shared base (layered under each env)
-│   ├── values-dev.yaml                ← dev overlay  (single node, local PVC, OSS)
-│   ├── values-qa.yaml                 ← qa overlay   (smaller mirror of prod)
-│   ├── values-prod.yaml               ← prod overlay (Dremio production setup)
-│   └── values-openshift-minimal.yaml  ← single-file POC profile (≈ common+dev)
+│   ├── values-openshift-overrides.yaml  ← Dremio's OFFICIAL OpenShift overrides (layer FIRST)
+│   ├── values-common.yaml               ← image / license / pull secret / service type
+│   ├── values-dev.yaml                  ← dev overlay  (single replicas, small)
+│   ├── values-qa.yaml                   ← qa overlay   (quorum, smaller-than-prod)
+│   └── values-prod.yaml                 ← prod overlay (Dremio production sizing)
 ├── openshift/
-│   ├── 01-namespace.yaml              ← project/namespace
-│   ├── 02-serviceaccount.yaml         ← dedicated ServiceAccount
-│   ├── 03-scc.yaml                    ← least-privilege SecurityContextConstraint (UID 999)
-│   ├── 04-rbac.yaml                   ← Role/RoleBinding granting 'use' of the SCC
-│   ├── 05-route-ui.yaml               ← Route exposing the Web UI (9047)
-│   └── 06-route-flight.yaml           ← (optional) Route for Arrow Flight (32010)
+│   ├── 01-namespace.yaml                ← project/namespace
+│   ├── 02-node-tuning-opensearch.yaml   ← REQUIRED vm.max_map_count Tuned CR
+│   ├── 03-route-ui.yaml                 ← Route exposing the Web UI (9047)
+│   └── 04-route-flight.yaml             ← (optional) Route for Arrow Flight (32010)
 └── scripts/
-    ├── preflight.sh                   ← read-only readiness checks
-    ├── install.sh                     ← end-to-end install wrapper
-    └── uninstall.sh                   ← teardown (keep or PURGE data)
+    ├── preflight.sh                     ← read-only readiness checks
+    ├── install.sh                       ← end-to-end install wrapper
+    └── uninstall.sh                     ← teardown (keep or PURGE data)
 ```
 
 ---
 
 ## Environments: dev / qa / prod
 
-Values are designed as a shared base plus per-environment overlays
-(`values-common.yaml` + `values-<env>.yaml`), installed into separate
-namespaces (`dremio-dev` / `dremio-qa` / `dremio-prod`):
+Values layer in the order Dremio requires — **OpenShift overrides → common →
+env** — into separate namespaces (`dremio-dev` / `dremio-qa` / `dremio-prod`):
 
-| Env  | Topology                                   | Storage        | Edition     | TLS / HA |
-|------|--------------------------------------------|----------------|-------------|----------|
-| dev  | 1 coord · 1 exec · 1 ZK (2 CPU/8 Gi)       | local PVC      | OSS (free)  | edge TLS, no HA |
-| qa   | 1 coord · 2 exec · 3 ZK (smaller-than-prod)| object storage | Enterprise* | e2e TLS, quorum |
-| prod | 1 coord · 3 exec · 3 ZK (~16 CPU/120 Gi)   | object storage | Enterprise  | e2e TLS, quorum, anti-affinity, dedicated node pools |
+| Env  | Coord / Exec | ZK · Mongo · OpenSearch | Storage | TLS / HA |
+|------|--------------|-------------------------|---------|----------|
+| dev  | 2/8 · 1×(2/8) | 1 · 1 · 1 | object store (e.g. MinIO) | edge TLS, no HA |
+| qa   | 8/32 · 2×(8/32) | 3 · 3 · 3 | object store | edge/reencrypt, quorum |
+| prod | 32/64 · 3×(16/128) | 3 · 3 · 3 | object store + Iceberg catalog | e2e TLS, dedicated node pools |
 
 ```bash
 make install ENV=dev      # or qa / prod
-make dry-run ENV=prod     # render only, no changes
+make dry-run ENV=prod     # render only
 make status  ENV=qa
 ```
 
-**Production aligns with Dremio's recommended production setup** — see
-[docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md) for the full comparison, rationale,
-prod prerequisites checklist, and a PodDisruptionBudget template.
+**Production aligns with Dremio's recommended production sizing** — see
+[docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md).
 
-## Key facts about Dremio 26 on Kubernetes
+## Key facts about Dremio 26 on OpenShift
 
-- **Helm v3 chart, distributed over OCI:** `oci://quay.io/dremio/dremio-helm`.
-  Requires **Helm ≥ 3.8**.
-- The **older v2 chart** (`github.com/dremio/dremio-cloud-tools/charts/dremio_v2`)
-  is **NOT compatible with Dremio 26** — do not use it.
-- **OpenShift specifics:** pods must run as a fixed UID (the image’s `dremio`
-  user, UID 999), which the default `restricted-v2` SCC forbids. This project
-  ships a tightly-scoped SCC bound to a dedicated ServiceAccount to satisfy that
-  without granting cluster-wide `anyuid`.
-- **Editions:** defaults to the free **OSS** image (`dremio/dremio-oss`); switch
-  to the **Enterprise** image (`quay.io/dremio/dremio-enterprise` + license +
-  pull secret) by editing `helm/values-openshift-minimal.yaml`.
+- **v3 Helm chart over OCI:** `oci://quay.io/dremio/dremio-helm` (chart `3.x.x`,
+  app `26.x.x`). Requires **Helm ≥ 3.8**. The old **v2** chart is **incompatible**.
+- **It's a platform, not a pod:** coordinator + elastic engines (engine
+  operator) + ZooKeeper + Iceberg catalog + **MongoDB (Percona) + OpenSearch +
+  NATS**, several with **operators/CRDs**.
+- **OpenShift security:** no custom SCC — `useOpenShiftRoles: true` makes the
+  chart bind its ServiceAccounts to the built-in **`nonroot`/`nonroot-v2`** SCCs.
+- **OpenSearch needs node tuning:** `vm.max_map_count=262144` via the Node Tuning
+  Operator (`openshift/02-node-tuning-opensearch.yaml`).
+- **Object storage is mandatory** (S3/ADLS/GCS); there is **no local-PVC** dist
+  storage in v3. The Iceberg catalog needs its own location too.
+- **Enterprise image by default** (`quay.io/dremio/dremio-enterprise`) → license
+  + `dremio-pull-secret` required.
 
 ## Endpoints
 
-| Purpose            | Port  | Exposed via            |
-|--------------------|-------|------------------------|
-| Web UI             | 9047  | Route (edge TLS)       |
-| JDBC / ODBC        | 31010 | port-forward / LB Service (raw TCP — not a Route) |
-| Arrow Flight SQL   | 32010 | optional passthrough Route |
+| Purpose | Port | Exposed via |
+|---------|------|-------------|
+| Web UI | 9047 | Route (edge or reencrypt) |
+| JDBC / ODBC | 31010 | port-forward / LB Service (raw TCP — not a Route) |
+| Arrow Flight SQL | 32010 | optional passthrough Route |
 
 ---
 
-## ⚠️ Important accuracy note about the values file
+## ⚠️ Accuracy note
 
-`helm/values-openshift-minimal.yaml` follows Dremio’s documented v3-chart
-structure (`coordinator` / `executor` / `zookeeper` / `distStorage` / `image` /
-`serviceAccount`). Because individual key names can shift between chart minor
-versions, **always generate the authoritative reference for your exact version
-and reconcile** before installing:
+These values match chart **`3.2.3`** / app **`26.1.3`**. Key names can shift
+between chart minors, so generate the authoritative reference for your version
+and reconcile before installing:
 
 ```bash
-helm show values oci://quay.io/dremio/dremio-helm --version 26.0.0 \
+helm show values oci://quay.io/dremio/dremio-helm --version 3.2.3 \
   > helm/values-reference.generated.yaml
 ```
-
-The install guide builds this into the procedure (Step 6).
 
 ---
 
@@ -131,4 +133,4 @@ The install guide builds this into the procedure (Step 6).
 - [Deploy Dremio on Kubernetes — Dremio Docs](https://docs.dremio.com/current/deploy-dremio/deploy-on-kubernetes/)
 - [Configuring Your Values to Deploy Dremio to Kubernetes — Dremio Docs](https://docs.dremio.com/current/deploy-dremio/configuring-kubernetes/)
 - [Red Hat OpenShift — Dremio Docs](https://docs.dremio.com/current/deploy-dremio/kubernetes-deployment-options/red-hat-openshift/)
-- [dremio/dremio-cloud-tools (legacy v2 chart, reference only)](https://github.com/dremio/dremio-cloud-tools)
+- [Administer Dremio on Kubernetes — Dremio Docs](https://docs.dremio.com/current/admin/admin-dremio-kubernetes/)

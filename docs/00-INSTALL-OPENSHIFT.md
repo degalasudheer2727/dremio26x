@@ -1,363 +1,264 @@
 # Deploy Dremio 26 on OpenShift — Step‑by‑Step (Spoon‑Fed) Guide
 
-This guide walks you, **one command at a time**, through deploying a **minimal
-Dremio 26** cluster on **Red Hat OpenShift** using the **Helm v3 chart** that
-Dremio ships for version 26+.
+This guide follows **Dremio's official Kubernetes/OpenShift deployment method**
+for **Dremio 26** using the **v3 Helm chart** (`oci://quay.io/dremio/dremio-helm`)
+and Dremio's **two‑file overrides** pattern with `useOpenShiftRoles`.
 
-> **Read this once before running `scripts/install.sh`.** The script does
-> exactly what this guide does — but you should understand each step.
+> Read this once before running `scripts/install.sh`. The script runs exactly
+> these steps.
 
-Estimated time: **30–45 minutes** on a cluster that already exists.
-
----
-
-## 0. Mental model — what are we building?
-
-A minimal Dremio cluster has four moving parts:
-
-| Component       | What it does                                   | How many (minimal) |
-|-----------------|------------------------------------------------|--------------------|
-| **Coordinator** | Web UI (9047), planning, JDBC/ODBC (31010), Arrow Flight (32010) | 1 (also master) |
-| **Executor**    | Runs the actual query work                     | 1                  |
-| **ZooKeeper**   | Cluster coordination / leader election         | 1                  |
-| **Dist storage**| Shared storage for reflections, job results, uploads | PVC (local)  |
-
-```
-                 ┌─────────────────────────────────────────┐
-   You ──HTTPS──▶│ OpenShift Route (edge TLS)               │
-                 └───────────────┬─────────────────────────┘
-                                 ▼  :9047
-                 ┌─────────────────────────────────────────┐
-                 │ Coordinator (master)  ── ZooKeeper       │
-                 │      │                                   │
-                 │      ▼                                   │
-                 │ Executor(s) ──▶ Distributed storage (PVC)│
-                 └─────────────────────────────────────────┘
-```
-
-### About “Helm + operator”
-For Dremio **26+, the Helm v3 chart *is* the supported, operator‑style install
-path.** It is published as an **OCI artifact on Quay** (`oci://quay.io/dremio/
-dremio-helm`) and manages the full Dremio control plane (StatefulSets, services,
-config) for you. The older **v2** chart from the `dremio-cloud-tools` GitHub repo
-is **not compatible with Dremio 26** — do not use it. There is no separate
-OperatorHub/OLM operator required for this minimal install.
+Estimated time: **45–60 minutes** on an existing cluster (the v3 platform has
+several components and pulls many images).
 
 ---
 
-## 1. Prerequisites (your workstation)
+## 0. What you are actually deploying
 
-You need these CLIs locally:
+Dremio 26's v3 chart is **not** just a coordinator + executors. It deploys a full
+platform, and several parts are **operators that install CRDs**:
 
-| Tool   | Minimum version | Why                                   | Get it |
-|--------|-----------------|---------------------------------------|--------|
-| `oc`   | matches cluster | OpenShift CLI                         | OpenShift web console → **?** → *Command line tools* |
-| `helm` | **3.8+**        | OCI registry support (`oci://`)       | https://helm.sh/docs/intro/install/ |
+| Component | Role | Notes |
+|-----------|------|-------|
+| **Coordinator** | UI (9047), planning, JDBC (31010), Flight (32010) | fixed UID 999 |
+| **Executor / Engine operator** | query execution; elastic engines | `dremio-engine-operator` (CRDs) |
+| **ZooKeeper** | cluster coordination | quorum in qa/prod |
+| **Catalog server + Catalog services** | Iceberg REST catalog | needs its own storage location |
+| **MongoDB (Percona) + operator** | catalog metadata store | `psmdb` CRDs; backups via dist storage |
+| **OpenSearch + operator** | semantic search/catalog | needs `vm.max_map_count` tuning |
+| **NATS (JetStream)** | internal messaging | natsBox disabled on OpenShift |
+| **Distributed storage** | reflections, results, uploads | **object storage only** (S3/ADLS/GCS) |
 
-Check them:
-
-```bash
-oc version --client
-helm version          # must report v3.8.0 or newer
+```
+        OpenShift Route (edge/reencrypt TLS) ──▶ Service dremio-client :9047
+                                                      │
+   Coordinator(master) ── ZooKeeper        Catalog ── MongoDB(+operator)
+        │                                  Catalog services ── OpenSearch(+operator)
+        ▼                                  NATS
+   Engine operator ──▶ Executors ──▶ Distributed storage (S3 / ADLS / GCS)
 ```
 
-You also need:
+### Versions — don't confuse these two
+- **Helm CHART version** is semver **`3.x.x`** (e.g. `3.2.3`) → use with `--version`.
+- **Dremio APP/image version** is **`26.x.x`** (e.g. `26.1.3`) → `dremio.image.tag`.
 
-- **Access to an OpenShift cluster** (4.x) and the `oc login` command for it.
-- **cluster‑admin** rights *once*, to create the SecurityContextConstraint
-  (SCC) in Step 4. If you are not an admin, hand `openshift/03-scc.yaml` and
-  `openshift/04-rbac.yaml` to one and ask them to apply them.
-- **A default StorageClass** that can dynamically provision `ReadWriteOnce`
-  PersistentVolumes. Check with `oc get storageclass`.
-- **Network egress to `quay.io`** from wherever you run `helm` (to pull the
-  chart) and from the cluster nodes (to pull images), or a mirror/proxy.
+### How OpenShift security is handled (important)
+You do **not** create a custom SCC. Dremio's official OpenShift overrides set
+**`useOpenShiftRoles: true`**, which makes the **chart render RoleBindings** that
+grant its ServiceAccounts the right to use OpenShift's built‑in **`nonroot`** and
+**`nonroot-v2`** SCCs. The coordinator keeps UID 999; other components let
+OpenShift assign a UID. See [RUNBOOK.md](RUNBOOK.md) Part A.
 
-> **Shortcut:** run `./scripts/preflight.sh` — it checks all of the above and
-> tells you what is missing.
+---
+
+## 1. Prerequisites
+
+| Tool | Version | Why |
+|------|---------|-----|
+| `oc` | matches cluster | OpenShift CLI |
+| `helm` | **≥ 3.8** | OCI (`oci://`) chart support |
+
+Cluster / account needs:
+- **OpenShift 4.x**, a default OpenShift router, and a **default StorageClass**
+  (SSD-class; NVMe for C3/spill in prod). `oc get storageclass`.
+- **cluster-admin once** — to apply the OpenSearch **Node Tuning** Tuned CR
+  (Step 4). Everything else is namespaced.
+- Permission to **create RoleBindings** in your project (so `useOpenShiftRoles`
+  can bind SCCs). Project admin normally has this.
+- **Object storage** (S3 / ADLS Gen2 / GCS) for distributed storage **and** a
+  (separate) location for the Iceberg catalog. There is **no local-PVC option**
+  in v3.
+- **Quay.io access** + an **Enterprise license** and **pull secret** (the chart
+  defaults to `quay.io/dremio/dremio-enterprise`).
+- For OpenSearch: nodes must allow `vm.max_map_count=262144` (Step 4).
+
+> Run `ENV=dev ./scripts/preflight.sh` to check all of the above.
 
 ---
 
 ## 2. Log in to OpenShift
 
-Copy your login command from the OpenShift web console
-(top‑right **▾ username → Copy login command**), or:
-
 ```bash
 oc login https://api.YOUR-CLUSTER.example.com:6443 -u YOUR_USER
-```
-
-Confirm:
-
-```bash
-oc whoami
-oc whoami --show-server
+oc whoami && oc whoami --show-server
 ```
 
 ---
 
-## 3. Create the project (namespace) and ServiceAccount
+## 3. Create the project (namespace)
 
 ```bash
-oc apply -f openshift/01-namespace.yaml
-oc apply -f openshift/02-serviceaccount.yaml
+oc apply -f openshift/01-namespace.yaml         # creates 'dremio' (POC), or:
+oc new-project dremio-dev                        # per-env convention
 ```
 
-Verify:
-
-```bash
-oc get project dremio
-oc get sa dremio -n dremio
-```
-
-> **Why a dedicated ServiceAccount?** OpenShift normally assigns each pod a
-> *random* UID. Dremio’s coordinator, executors and ZooKeeper must all run as
-> the **same** user so they can read each other’s files on the shared volumes.
-> We pin that user via an SCC in the next step, bound to this ServiceAccount.
+The env scripts use `dremio-dev` / `dremio-qa` / `dremio-prod`.
 
 ---
 
-## 4. Grant the SCC (needs cluster‑admin, one time)
+## 4. Apply OpenSearch node tuning (cluster-admin, one time)
 
-The Dremio image runs as **UID/GID 999**. OpenShift’s default `restricted-v2`
-SCC forbids that. We apply a **tightly‑scoped** SCC that lets **only** the
-`dremio` ServiceAccount run as UID 999, and bind it via RBAC.
-
-```bash
-oc apply -f openshift/03-scc.yaml      # the SecurityContextConstraint
-oc apply -f openshift/04-rbac.yaml     # Role + RoleBinding that grants 'use'
-```
-
-Verify the binding (equivalent to `oc adm policy add-scc-to-user`):
+The OpenShift overrides disable OpenSearch's privileged init container, so you
+must raise `vm.max_map_count` on the nodes via the Node Tuning Operator:
 
 ```bash
-oc get scc dremio-scc
-oc auth can-i use scc/dremio-scc \
-   --as=system:serviceaccount:dremio:dremio -n dremio   # -> yes
+oc apply -f openshift/02-node-tuning-opensearch.yaml
 ```
 
-> Not a cluster‑admin? Send `openshift/03-scc.yaml` and `04-rbac.yaml` to one.
-> They are safe: the SCC applies to a single ServiceAccount in one namespace,
-> grants no host access, and drops all Linux capabilities.
->
-> **Admin doing the SCC and any CRDs as a standalone task?** Use the dedicated
-> [RUNBOOK.md](RUNBOOK.md) — it covers SCC + CRD apply/verify/upgrade/rollback
-> and the correct cluster-scoped ordering in isolation.
+Verify after pods land (on an OpenSearch node):
+
+```bash
+oc debug node/<node> -- chroot /host sysctl vm.max_map_count   # >= 262144
+```
+
+> Not cluster-admin? Hand `openshift/02-node-tuning-opensearch.yaml` to one.
+> Doing SCC/CRD work as a standalone admin task? Use [RUNBOOK.md](RUNBOOK.md).
 
 ---
 
-## 5. (Enterprise only) Create an image pull secret
-
-**Skip this if you use the free OSS image** (`dremio/dremio-oss`, the default in
-the values file). For the **Enterprise** image on Quay you need credentials:
+## 5. Create the Enterprise pull secret + set the license
 
 ```bash
+NS=dremio-dev
 oc create secret docker-registry dremio-pull-secret \
   --docker-server=quay.io \
   --docker-username='YOUR_QUAY_USER' \
   --docker-password='YOUR_QUAY_TOKEN' \
-  -n dremio
-
-# link it to the ServiceAccount so pods can pull:
-oc secrets link dremio dremio-pull-secret --for=pull -n dremio
+  -n "$NS"
 ```
 
-Then in `helm/values-openshift-minimal.yaml` set the enterprise image and
-uncomment `image.pullSecrets: [dremio-pull-secret]`.
+Put your license key in `helm/values-common.yaml` (`dremio.license: "..."`), or
+keep it out of git and pass it at install time:
+
+```bash
+# license in a local file, never committed:
+#   helm ... --set-file dremio.license=./dremio.license
+```
 
 ---
 
-## 6. Get the authoritative chart defaults (and pin a version)
+## 6. Pin the chart version and get the authoritative defaults
 
-List available chart versions and pin one — never deploy “latest” to anything
-you care about:
+Find chart versions and generate the real reference to diff against:
 
 ```bash
-# If quay requires auth for the chart, log in first (usually NOT needed for OSS):
-# helm registry login quay.io
-
-# See the chart's real default values for YOUR target version:
-helm show values oci://quay.io/dremio/dremio-helm --version 26.0.0 \
+# helm registry login quay.io     # if your access requires auth
+helm show values oci://quay.io/dremio/dremio-helm --version 3.2.3 \
   > helm/values-reference.generated.yaml
-```
-
-Open `helm/values-reference.generated.yaml` and skim it. Then **diff** our
-minimal override against it to make sure every key we set actually exists in
-this chart version:
-
-```bash
-# eyeball that keys like coordinator/executor/zookeeper/distStorage/image match
 less helm/values-reference.generated.yaml
 ```
 
-> **Why:** key names occasionally shift between chart minor versions.
-> `helm/values-openshift-minimal.yaml` follows the documented structure, but the
-> generated file above is the source of truth for *your* version. If a key
-> differs, edit the override to match before installing.
+> Chart keys can shift between chart minors. Our values files match chart
+> **3.2.3 / app 26.1.3**; reconcile against the generated file for your version.
 
 ---
 
-> **Deploying dev/qa/prod instead of a one-off POC?** This walk-through uses the
-> single-file `values-openshift-minimal.yaml`. For real environments use the
-> layered `values-common.yaml` + `values-<env>.yaml` files and per-env
-> namespaces (`make install ENV=dev|qa|prod`). See
-> [ENVIRONMENTS.md](ENVIRONMENTS.md) — prod there follows Dremio's production
-> recommendations.
+## 7. Review your environment values
 
-## 7. Review the minimal values override
+Open the three files Helm will layer (order matters):
 
-Open [`helm/values-openshift-minimal.yaml`](../helm/values-openshift-minimal.yaml)
-and confirm/adjust:
+1. [`helm/values-openshift-overrides.yaml`](../helm/values-openshift-overrides.yaml)
+   — Dremio's official OpenShift file (`useOpenShiftRoles`, security contexts,
+   `opensearch.setVMMaxMapCount: false`, natsBox off). Usually unchanged.
+2. [`helm/values-common.yaml`](../helm/values-common.yaml) — image/license/pull
+   secret, `service.type: ClusterIP`.
+3. `helm/values-<env>.yaml` — sizing, replica counts, **object storage**.
 
-- `image.tag` → the exact Dremio 26 tag you want (e.g. `26.0.0`).
-- `storageClass` → leave `""` for the cluster default, or set a specific class.
-- CPU/memory → defaults are small (2 CPU / 8 Gi each). Lower them only for a tiny
-  lab; raise them for real workloads.
-- `distStorage.type` → `local` (PVC) for minimal; switch to `aws`/`azure`/`gcp`
-  for production object storage.
-
-> Do **not** set `runAsUser`/`fsGroup` in the values on OpenShift — the SCC
-> supplies UID/GID 999. Overriding it will cause permission errors.
+Set, at minimum, in the env file: `distStorage` (bucket + auth) and (prod)
+`catalog.storage`. See [ENVIRONMENTS.md](ENVIRONMENTS.md).
 
 ---
 
-## 8. Dry‑run, then install
-
-Validate before touching the cluster:
+## 8. Dry‑run, then install (official two‑file pattern)
 
 ```bash
+NS=dremio-dev
 helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
-  --version 26.0.0 \
-  --namespace dremio \
-  --values helm/values-openshift-minimal.yaml \
-  --dry-run
+  --version 3.2.3 \
+  --namespace "$NS" \
+  -f helm/values-openshift-overrides.yaml \
+  -f helm/values-common.yaml \
+  -f helm/values-dev.yaml \
+  --dry-run            # validate first
+
+helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
+  --version 3.2.3 \
+  --namespace "$NS" \
+  -f helm/values-openshift-overrides.yaml \
+  -f helm/values-common.yaml \
+  -f helm/values-dev.yaml \
+  --wait --timeout 30m
 ```
 
-If the render is clean, install for real:
-
-```bash
-helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
-  --version 26.0.0 \
-  --namespace dremio \
-  --values helm/values-openshift-minimal.yaml \
-  --wait --timeout 15m
-```
-
-> `upgrade --install` is **idempotent**: it installs on first run and upgrades
-> on later runs. Re‑run the same command after editing values to apply changes.
+> This is exactly what `ENV=dev ./scripts/install.sh` runs.
 
 ---
 
 ## 9. Watch it come up
 
 ```bash
-oc get pods -n dremio -w
+oc get pods -n dremio-dev -w
 ```
 
-Wait until every pod is `Running` and `READY` shows full (e.g. `1/1`). Expect
-something like:
-
-```
-NAME                       READY   STATUS    RESTARTS   AGE
-dremio-master-0            1/1     Running   0          3m
-dremio-executor-0          1/1     Running   0          3m
-zk-0                       1/1     Running   0          3m
-```
-
-If a pod is stuck `Pending`, it is almost always **PVC/StorageClass** related —
-see [TROUBLESHOOTING](TROUBLESHOOTING.md). Tail logs with:
+The platform starts in stages (zookeeper → mongodb/opensearch → coordinator →
+executors → catalog). Give it time. Confirm each pod runs under the expected
+SCC:
 
 ```bash
-oc logs -f dremio-master-0 -n dremio
+oc get pods -n dremio-dev -o \
+  'custom-columns=POD:.metadata.name,SCC:.metadata.annotations.openshift\.io/scc'
+# Dremio pods should show nonroot / nonroot-v2 (NOT restricted-v2 failing)
 ```
 
-The master is ready when the log prints a line like
-`Dremio Daemon Started as master`.
+Coordinator log readiness:
+
+```bash
+oc logs -f dremio-master-0 -n dremio-dev
+```
+
+Stuck pods? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (OpenSearch
+`max_map_count`, pull-secret, object-storage auth are the usual culprits).
 
 ---
 
-## 10. Expose the Web UI with a Route
-
-First find the service the chart created for client/UI traffic:
+## 10. Expose the Web UI
 
 ```bash
-oc get svc -n dremio
+oc get svc dremio-client -n dremio-dev          # confirm it exists
+oc apply -f openshift/03-route-ui.yaml          # edit namespace if not 'dremio'
+oc get route dremio-ui -n dremio-dev -o jsonpath='https://{.spec.host}{"\n"}'
 ```
 
-Note the client service name (commonly `dremio-client`). If it matches, apply
-the Route as‑is; otherwise edit `to.name` in the file first:
+Open the HTTPS URL → **create the admin account on first login**. 🎉
 
-```bash
-oc apply -f openshift/05-route-ui.yaml
-```
+> Local access without a Route:
+> `oc port-forward svc/dremio-client 9047:9047 -n dremio-dev` → http://localhost:9047
 
-Get your URL:
-
-```bash
-oc get route dremio-ui -n dremio -o jsonpath='https://{.spec.host}{"\n"}'
-```
-
-Open that HTTPS URL in a browser. **On first login Dremio asks you to create the
-admin account** — set a username/email and a strong password. Done. 🎉
-
-> No external traffic / can’t use Routes? Reach the UI locally instead:
-> ```bash
-> oc port-forward svc/dremio-client 9047:9047 -n dremio
-> # then open http://localhost:9047
-> ```
+For qa/prod the UI runs TLS inside the pod — switch the Route to `reencrypt`.
+Arrow Flight (32010): apply `openshift/04-route-flight.yaml` (passthrough, needs
+`coordinator.flight.tls.enabled: true`). JDBC (31010) is raw TCP → use
+port-forward or a LoadBalancer Service.
 
 ---
 
-## 11. (Optional) Expose JDBC and Arrow Flight
-
-- **Arrow Flight SQL (32010):** apply `openshift/06-route-flight.yaml`. This uses
-  **passthrough** TLS, so you must enable Flight TLS in the values
-  (`coordinator.flight.tls.enabled: true`) for it to work end‑to‑end.
-- **JDBC/ODBC (31010):** this is raw TCP and **cannot** go through an HTTP Route.
-  For external access create a `LoadBalancer`/`NodePort` Service, or for local
-  testing use:
-  ```bash
-  oc port-forward svc/dremio-client 31010:31010 -n dremio
-  ```
-
----
-
-## 12. Verify it actually works
+## 11. Verify
 
 ```bash
-# All workloads healthy?
-oc get statefulset,pods,pvc,svc,route -n dremio
-
-# Helm thinks the release is deployed?
-helm status dremio -n dremio
+oc get statefulset,deploy,pods,pvc,svc,route -n dremio-dev
+helm status dremio -n dremio-dev
+oc get crd | grep -iE 'dremio|opensearch|psmdb'      # operator CRDs present
 ```
 
-Then in the Web UI: log in → **Add Source → Sample Source** (or upload a small
-CSV) → run `SELECT 1` in the SQL Runner. A returned result confirms the
-coordinator + executor + storage path are all wired correctly.
-
----
-
-## Day‑2 quick reference
-
-| Task                     | Command |
-|--------------------------|---------|
-| Change config / resources| edit `helm/values-openshift-minimal.yaml`, re‑run the Step‑8 `upgrade --install` |
-| Scale executors          | set `executor.count`, re‑run upgrade |
-| Upgrade Dremio version   | bump `image.tag` **and** `--version`, see [UNINSTALL/upgrade notes](../docs/TROUBLESHOOTING.md) and Dremio’s upgrade docs |
-| View logs                | `oc logs -f dremio-master-0 -n dremio` |
-| Uninstall (keep data)    | `./scripts/uninstall.sh` |
-| Uninstall (delete data)  | `PURGE=1 ./scripts/uninstall.sh` |
+In the UI: run `SELECT 1` in the SQL Runner; add a sample source. A result
+confirms coordinator + engine + catalog + storage are wired correctly.
 
 ---
 
 ## One‑shot automated path
 
-If you have read the above and just want it done:
-
 ```bash
-./scripts/preflight.sh                       # check readiness
-DREMIO_CHART_VERSION=26.0.0 ./scripts/install.sh
+ENV=dev ./scripts/preflight.sh
+ENV=dev CHART_VERSION=3.2.3 ./scripts/install.sh
 ```
 
-See [`README.md`](../README.md) for the file map and
-[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) when something misbehaves.
+Next: [ENVIRONMENTS.md](ENVIRONMENTS.md) (dev/qa/prod), [RUNBOOK.md](RUNBOOK.md)
+(SCC/CRD ops), [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

@@ -1,33 +1,32 @@
 # =============================================================================
-# Dremio 26 on OpenShift — convenience targets
+# Dremio 26 (v3 chart) on OpenShift — convenience targets
 # =============================================================================
-# Pick an environment with ENV=dev|qa|prod (omit for the single-namespace
-# minimal/POC profile). Examples:
+# Pick an environment with ENV=dev|qa|prod (default dev). Examples:
 #   make install ENV=dev
-#   make dry-run ENV=prod CHART_VERSION=26.0.0
+#   make dry-run ENV=prod CHART_VERSION=3.2.3
 #   make status  ENV=qa
+#
+# NOTE: CHART_VERSION is the Helm CHART semver (e.g. 3.2.3), NOT the Dremio
+# app/image version (26.x). Leave unset for the latest chart.
 # =============================================================================
 SHELL          := /usr/bin/env bash
-ENV            ?=
+ENV            ?= dev
 RELEASE        ?= dremio
 CHART          ?= oci://quay.io/dremio/dremio-helm
-CHART_VERSION  ?= 26.0.0
+CHART_VERSION  ?=
+NAMESPACE      ?= dremio-$(ENV)
 
-# Resolve namespace + values files from ENV.
-ifeq ($(ENV),)
-  NAMESPACE    ?= dremio
-  VALUES_FILES := helm/values-openshift-minimal.yaml
-else
-  NAMESPACE    ?= dremio-$(ENV)
-  VALUES_FILES := helm/values-common.yaml helm/values-$(ENV).yaml
-endif
-VALUES_ARGS := $(addprefix --values ,$(VALUES_FILES))
+VER_ARG := $(if $(CHART_VERSION),--version $(CHART_VERSION),)
+VALUES  := -f helm/values-openshift-overrides.yaml \
+           -f helm/values-common.yaml \
+           -f helm/values-$(ENV).yaml
 
 .DEFAULT_GOAL := help
 
 .PHONY: help
 help: ## Show this help
-	@echo "ENV=$(ENV)  NAMESPACE=$(NAMESPACE)  VALUES=$(VALUES_FILES)"
+	@echo "ENV=$(ENV)  NAMESPACE=$(NAMESPACE)  CHART_VERSION=$(CHART_VERSION)"
+	@echo "VALUES: openshift-overrides + common + $(ENV)"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
@@ -35,33 +34,50 @@ help: ## Show this help
 preflight: ## Run read-only readiness checks
 	DREMIO_NAMESPACE=$(NAMESPACE) ./scripts/preflight.sh
 
+.PHONY: node-tuning
+node-tuning: ## Apply the OpenSearch vm.max_map_count Tuned CR (cluster-admin)
+	oc apply -f openshift/02-node-tuning-opensearch.yaml
+
 .PHONY: values-ref
 values-ref: ## Generate the chart's authoritative default values for diffing
-	helm show values $(CHART) --version $(CHART_VERSION) > helm/values-reference.generated.yaml
+	helm show values $(CHART) $(VER_ARG) > helm/values-reference.generated.yaml
 	@echo "wrote helm/values-reference.generated.yaml"
 
 .PHONY: dry-run
 dry-run: ## Render/validate the release without installing
-	helm upgrade --install $(RELEASE) $(CHART) --version $(CHART_VERSION) \
-		--namespace $(NAMESPACE) $(VALUES_ARGS) --dry-run
+	helm upgrade --install $(RELEASE) $(CHART) $(VER_ARG) \
+		--namespace $(NAMESPACE) $(VALUES) --dry-run
+
+.PHONY: template
+template: ## Render manifests to stdout (inspect what will be applied)
+	helm template $(RELEASE) $(CHART) $(VER_ARG) --namespace $(NAMESPACE) $(VALUES)
 
 .PHONY: install
-install: ## Full guided install (prereqs + helm + UI route) for ENV
+install: ## Full guided install (namespace + node-tuning + helm + UI route)
 	ENV=$(ENV) DREMIO_NAMESPACE=$(NAMESPACE) DREMIO_RELEASE=$(RELEASE) \
-	DREMIO_CHART=$(CHART) DREMIO_CHART_VERSION=$(CHART_VERSION) ./scripts/install.sh
+	DREMIO_CHART=$(CHART) CHART_VERSION=$(CHART_VERSION) ./scripts/install.sh
 
 .PHONY: helm-only
-helm-only: ## Run only the helm upgrade --install step for ENV
-	helm upgrade --install $(RELEASE) $(CHART) --version $(CHART_VERSION) \
-		--namespace $(NAMESPACE) $(VALUES_ARGS) --wait --timeout 20m
+helm-only: ## Run only the helm upgrade --install step
+	helm upgrade --install $(RELEASE) $(CHART) $(VER_ARG) \
+		--namespace $(NAMESPACE) $(VALUES) --wait --timeout 30m
+
+.PHONY: route
+route: ## Apply the Web UI Route
+	sed 's|namespace: dremio$$|namespace: $(NAMESPACE)|g' openshift/03-route-ui.yaml | oc apply -f -
+	@oc get route dremio-ui -n $(NAMESPACE) -o jsonpath='UI: https://{.spec.host}{"\n"}' || true
 
 .PHONY: status
 status: ## Show all Dremio resources in the ENV namespace
-	oc get statefulset,pods,pvc,svc,route -n $(NAMESPACE)
+	oc get statefulset,deploy,pods,pvc,svc,route -n $(NAMESPACE)
 	-helm status $(RELEASE) -n $(NAMESPACE)
 
+.PHONY: crds
+crds: ## List Dremio/operator CRDs installed on the cluster
+	oc get crd | grep -iE 'dremio|opensearch|psmdb|percona' || echo "no matching CRDs found"
+
 .PHONY: logs
-logs: ## Tail the master/coordinator log
+logs: ## Tail the coordinator (master) log
 	oc logs -f dremio-master-0 -n $(NAMESPACE)
 
 .PHONY: uninstall

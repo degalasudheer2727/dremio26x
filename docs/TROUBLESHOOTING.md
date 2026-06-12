@@ -29,27 +29,41 @@ oc get pvc -n dremio
 
 ## Pod `CrashLoopBackOff` with permission errors
 
-Symptoms in logs: `Permission denied`, `Operation not permitted`, can’t write to
-`/opt/dremio/data` or the dist volume.
+Symptoms: `Permission denied` / `Operation not permitted` writing to a volume,
+or pods admitted to `restricted-v2` and failing.
 
-This means the SCC/UID is wrong.
+The SCC RoleBindings (`useOpenShiftRoles`) didn't apply.
 
 ```bash
-# Is the SA actually allowed to use our SCC?
-oc auth can-i use scc/dremio-scc \
-  --as=system:serviceaccount:dremio:dremio -n dremio        # must say "yes"
-
-# Which SCC did the pod actually get?
-oc get pod <pod> -n dremio -o jsonpath='{.metadata.annotations.openshift\.io/scc}{"\n"}'
+NS=dremio-dev
+# Which SCC did the pod actually get? (want nonroot / nonroot-v2)
+oc get pods -n $NS -o 'custom-columns=POD:.metadata.name,SCC:.metadata.annotations.openshift\.io/scc'
+# Did the chart create the RoleBindings?
+oc get rolebinding -n $NS | grep nonroot
 ```
 
 Fixes:
-- Ensure `serviceAccount: dremio` is set in the values (pods must run as the
-  `dremio` SA, not `default`).
-- Ensure `openshift/03-scc.yaml` and `04-rbac.yaml` were applied by a
-  cluster-admin.
-- Make sure you did **not** set `runAsUser`/`fsGroup` in the values — let the
-  SCC inject UID/GID 999.
+- Ensure `helm/values-openshift-overrides.yaml` was layered **first** (it sets
+  `useOpenShiftRoles: true`). Re-run the install with all three `-f` files.
+- Ensure the installer can create RoleBindings:
+  `oc auth can-i create rolebindings -n $NS`.
+- Do **not** add a custom SCC or set `serviceAccount` manually — the chart
+  manages SAs and binds the built-in `nonroot`/`nonroot-v2` SCCs.
+
+---
+
+## OpenSearch pods crash / cluster never forms
+
+Symptom: OpenSearch logs mention `max virtual memory areas vm.max_map_count
+[65530] is too low`.
+
+The Node Tuning Operator setting wasn't applied (the OpenShift overrides disable
+the privileged init container on purpose).
+
+```bash
+oc apply -f openshift/02-node-tuning-opensearch.yaml          # cluster-admin
+oc debug node/<node> -- chroot /host sysctl vm.max_map_count  # must be >= 262144
+```
 
 ---
 
@@ -74,10 +88,11 @@ Error: failed to download "oci://quay.io/dremio/dremio-helm"
 oc describe pod <pod> -n dremio | grep -A3 -i 'failed to pull\|pull access'
 ```
 
-- **OSS image** `dremio/dremio-oss:<tag>` not found → the tag doesn’t exist;
-  verify the exact 26.x tag on the registry and fix `image.tag`.
-- **Enterprise image** unauthorized → create and link the pull secret
-  (install guide Step 5) and reference it in `image.pullSecrets`.
+- **Enterprise image** `quay.io/dremio/dremio-enterprise:<tag>` unauthorized →
+  create the `dremio-pull-secret` in the namespace (install guide Step 5); it is
+  referenced via `imagePullSecrets` in `values-common.yaml`.
+- Tag not found → verify the exact `26.x` app tag and fix `dremio.image.tag`
+  (and the companion images all come from quay — ensure egress/mirror).
 
 ---
 
@@ -89,8 +104,8 @@ oc get svc -n dremio
 ```
 
 - **404 / service not found from the Route** → the Route’s `to.name` doesn’t
-  match the real client service name. Run `oc get svc -n dremio`, then edit
-  `to.name` in `openshift/05-route-ui.yaml` and re-apply.
+  match the real client service name (`dremio-client`). Run `oc get svc -n
+  dremio-<env>`, then edit `to.name` in `openshift/03-route-ui.yaml` and re-apply.
 - **`targetPort` not found** → the service uses numeric ports, not named ones.
   Change `port.targetPort` in the Route to `9047`.
 - **Just testing?** Bypass Routes entirely:
@@ -104,7 +119,7 @@ oc get svc -n dremio
 
 Flight is gRPC/HTTP2 and the passthrough Route requires TLS **inside** Dremio.
 Set `coordinator.flight.tls.enabled: true` (and provide certs) in the values,
-re-run the upgrade, then re-apply `06-route-flight.yaml`. Without in-pod TLS the
+re-run the upgrade, then re-apply `04-route-flight.yaml`. Without in-pod TLS the
 passthrough route cannot complete the gRPC handshake.
 
 ---
@@ -122,8 +137,9 @@ Then confirm the key path you’re overriding exists in that file, and move it i
 not. Render what Helm *would* apply, without installing:
 
 ```bash
-helm template dremio oci://quay.io/dremio/dremio-helm --version <v> \
-  --values helm/values-openshift-minimal.yaml -n dremio | less
+helm template dremio oci://quay.io/dremio/dremio-helm --version 3.2.3 \
+  -f helm/values-openshift-overrides.yaml -f helm/values-common.yaml \
+  -f helm/values-dev.yaml -n dremio-dev | less
 ```
 
 ---

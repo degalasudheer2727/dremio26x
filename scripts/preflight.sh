@@ -43,11 +43,25 @@ else
   err "Not logged in. Run: oc login <api-url> -u <user>"; exit 1
 fi
 
-echo "-- Cluster-admin (needed to create the SCC)? --"
-if oc auth can-i create securitycontextconstraints >/dev/null 2>&1; then
-  ok "You can create SecurityContextConstraints"
+echo "-- Can create the OpenSearch node-tuning Tuned CR (cluster-admin)? --"
+if oc auth can-i create tuneds.tuned.openshift.io -n openshift-cluster-node-tuning-operator >/dev/null 2>&1; then
+  ok "You can create Tuned CRs (vm.max_map_count for OpenSearch)"
 else
-  warn "You may NOT be able to create the SCC. Ask a cluster-admin to apply openshift/03-scc.yaml."
+  warn "May not be able to apply openshift/02-node-tuning-opensearch.yaml. Ask a cluster-admin."
+fi
+
+echo "-- Can create RoleBindings (chart needs this for useOpenShiftRoles)? --"
+if oc auth can-i create rolebindings.rbac.authorization.k8s.io -n "${NS}" >/dev/null 2>&1; then
+  ok "RoleBindings allowed (chart will bind SAs to nonroot/nonroot-v2 SCCs)"
+else
+  warn "Cannot create RoleBindings in ${NS}; useOpenShiftRoles will fail. Need elevated rights."
+fi
+
+echo "-- Enterprise image pull secret present in '${NS}'? --"
+if oc get secret dremio-pull-secret -n "${NS}" >/dev/null 2>&1; then
+  ok "dremio-pull-secret found"
+else
+  warn "dremio-pull-secret missing in ${NS}. Create it before install (Enterprise image on quay.io)."
 fi
 
 echo "-- StorageClasses available --"

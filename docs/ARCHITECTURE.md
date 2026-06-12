@@ -1,74 +1,80 @@
-# Architecture & Design Notes
+# Architecture & Design Notes (Dremio 26 v3 chart)
 
-## Components
+## The v3 platform
+
+Dremio 26's Helm chart (`oci://quay.io/dremio/dremio-helm`, semver `3.x.x`)
+deploys an **operator-based platform**, not just coordinator + executors:
 
 ```
-                         OpenShift cluster (namespace: dremio)
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │                                                                        │
-  │   Route(edge TLS) ─▶ Service(dremio-client) ─▶ Coordinator (master-0)  │
-  │      :443→:9047                          ┌──────────┴──────────┐       │
-  │                                          │ planning, UI, JDBC, │       │
-  │                                          │ Arrow Flight        │       │
-  │                                          └──────────┬──────────┘       │
-  │                                                     │ assigns work     │
-  │   ZooKeeper (zk-0) ◀── coordination ───────────────┤                  │
-  │                                                     ▼                  │
-  │                                            Executor(s) (executor-0)    │
-  │                                                     │                  │
-  │                                                     ▼                  │
-  │                                   Distributed storage (PVC / S3 / ...) │
-  │                                   reflections · job results · uploads  │
-  └──────────────────────────────────────────────────────────────────────┘
+            OpenShift Route ──▶ Service dremio-client (web 9047 / client 31010 / flight 32010)
+                                     │
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │ Coordinator (master, UID 999) ── ZooKeeper (quorum)                    │
+   │      │                                                                 │
+   │      ▼                                                                 │
+   │ Engine operator ──▶ Executors (elastic engines) ──▶ Distributed storage│
+   │                                                      (S3 / ADLS / GCS) │
+   │ Catalog server + Catalog services (Iceberg REST)                       │
+   │      │            │                                                    │
+   │      ▼            ▼                                                    │
+   │ MongoDB (Percona) + operator        OpenSearch + operator              │
+   │   (catalog metadata, backups)         (semantic search)                │
+   │ NATS (JetStream)        Telemetry (OTel)        DDC (diagnostics)       │
+   └──────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Coordinator (master):** hosts the web UI (9047), parses & plans SQL,
-  exposes JDBC/ODBC (31010) and Arrow Flight SQL (32010), and stores cluster
-  metadata in a local RocksDB key-value store (its PVC).
-- **Executor:** receives query fragments from the coordinator and executes
-  them. Scaling out = more/larger executors. C3 “cloud cache” (off in minimal)
-  caches object-storage reads on local NVMe.
-- **ZooKeeper:** coordinates the cluster and elects the master. One node is fine
-  for dev; use **3** for production quorum.
-- **Distributed storage:** shared scratch for reflections (accelerations), job
-  result sets, uploads and downloads. Minimal setup uses a PVC; production
-  should use object storage (S3 / ADLS Gen2 / GCS).
+| Component | Role | Key facts |
+|-----------|------|-----------|
+| Coordinator | UI/planning/JDBC/Flight | StatefulSet `dremio-master-*`; fixed UID 999 |
+| Engine operator + executors | query execution; elastic engine sizing | `engine.options.sizes` (2XSmall…4XLarge) |
+| ZooKeeper | coordination | 1 (dev) / 3 (qa,prod) |
+| Catalog server (+ external access) | Iceberg REST catalog | needs `catalog.storage` location |
+| Catalog services | catalog control plane | |
+| MongoDB (Percona) + operator | catalog metadata store | `psmdb` CRDs; backup + PITR |
+| OpenSearch + operator | search | needs `vm.max_map_count` node tuning |
+| NATS (JetStream) | messaging | natsBox disabled on OpenShift |
+| Distributed storage | reflections/results/uploads | **object storage only** |
+| Telemetry / DDC | observability / diagnostics | OTel collector |
 
-## Why these OpenShift-specific objects
+## Versions
+
+- **Chart**: semver `3.x.x` (e.g. `3.2.3`) → `helm --version`.
+- **App/image**: `26.x.x` (e.g. `26.1.3`) → `dremio.image.tag`.
+- v2 charts (`dremio-cloud-tools/charts/dremio_v2`) are **incompatible** with 26.
+
+## OpenShift security model
+
+- **No custom SCC.** `useOpenShiftRoles: true` (in the official overrides) makes
+  the chart render RoleBindings that grant its ServiceAccounts the right to use
+  the built-in **`nonroot`/`nonroot-v2`** SCCs.
+- Per-component ServiceAccounts are created by the chart: `dremio-coordinator`,
+  `dremio-executor`, `dremio-engine-operator`, `dremio-engine-executor`,
+  `zookeeper`, `dremio-catalog-server`, `dremio-catalog-services`,
+  `dremio-mongodb`, `dremio-nats`, `dremio-opensearch-operator`,
+  `opensearch-cluster`.
+- Coordinator keeps UID 999; components that tolerate arbitrary UIDs use
+  `runAsUser: null` (OpenShift assigns). See [RUNBOOK.md](RUNBOOK.md) Part A.
+- OpenSearch privileged init container is disabled → `vm.max_map_count` is set
+  via the **Node Tuning Operator** (`openshift/02-node-tuning-opensearch.yaml`).
+
+## Why these repo objects
 
 | Object | File | Reason |
 |--------|------|--------|
-| ServiceAccount | `02-serviceaccount.yaml` | A stable identity to attach the SCC to. |
-| SCC | `03-scc.yaml` | OpenShift blocks fixed UIDs by default; Dremio’s image needs UID/GID 999 consistently across all pods. |
-| Role + RoleBinding | `04-rbac.yaml` | Grants the ServiceAccount permission to *use* the SCC (the GitOps form of `oc adm policy add-scc-to-user`). |
-| Route (UI) | `05-route-ui.yaml` | OpenShift uses Routes (not Ingress) to publish HTTP services; edge TLS terminates at the router. |
-| Route (Flight) | `06-route-flight.yaml` | Arrow Flight is gRPC/HTTP2 → needs a TLS (passthrough) Route. |
+| Namespace | `openshift/01-namespace.yaml` | project for the release |
+| Tuned CR | `openshift/02-node-tuning-opensearch.yaml` | required `vm.max_map_count=262144` for OpenSearch |
+| Route (UI) | `openshift/03-route-ui.yaml` | expose `dremio-client` web port (9047) |
+| Route (Flight) | `openshift/04-route-flight.yaml` | optional external Arrow Flight (passthrough TLS) |
 
-## Chart lineage (important)
-
-- Dremio **24/25** used the **v2** chart from
-  `github.com/dremio/dremio-cloud-tools` (`charts/dremio_v2`). **Deprecated.**
-- Dremio **26+** uses the **v3** chart published as an **OCI artifact**:
-  `oci://quay.io/dremio/dremio-helm`. The v2 chart is **not compatible** with 26.
-- This project targets **v3 only**. The values file mirrors the documented v3
-  structure; always reconcile against `helm show values` for your exact version.
-
-## Security posture of the minimal setup
-
-- **Least-privilege SCC:** no host network/IPC/PID, no privilege escalation, all
-  capabilities dropped, fixed non-root UID 999, scoped to one ServiceAccount in
-  one namespace. It is **not** the cluster-wide `anyuid` SCC.
-- **TLS:** terminated at the Route (edge) for the UI in the minimal profile, so
-  in-cluster traffic is plain HTTP. For end-to-end TLS, enable TLS in the
-  coordinator values and switch the Route to `reencrypt`/`passthrough`.
-- **Secrets:** Enterprise pull credentials and any object-storage keys belong in
-  Kubernetes Secrets, never committed to git. The values file references them by
-  name only.
+ServiceAccounts, Roles/RoleBindings, and SCC bindings are **created by the
+chart** — they are intentionally not in this repo.
 
 ## What to change for production
 
-1. ZooKeeper `count: 3`; coordinator/executor resources sized to workload.
-2. `distStorage` → object storage (S3/ADLS/GCS), not a local PVC.
-3. Enterprise image + license; enable TLS end-to-end.
-4. Add PodDisruptionBudgets, anti-affinity, monitoring, and backups of the
-   coordinator metadata volume.
+1. Object storage for dist + a separate Iceberg `catalog.storage` location.
+2. Dedicated node pools (nodeSelector/tolerations), explicit SSD/NVMe
+   StorageClass.
+3. End-to-end TLS (cert Secrets + reencrypt Routes).
+4. 3-node ZooKeeper/MongoDB/OpenSearch (defaults), MongoDB backup+PITR, catalog
+   replicas ≥ 2, executor count sized to concurrency.
+5. Backups of the distributed store and verified MongoDB restore.

@@ -1,99 +1,79 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install.sh - deploy Dremio 26 to OpenShift (dev / qa / prod aware)
+# install.sh - deploy Dremio 26 (v3 chart) to OpenShift, per Dremio's guide
 # =============================================================================
-# Convenience wrapper around the steps in docs/00-INSTALL-OPENSHIFT.md and the
-# environment design in docs/ENVIRONMENTS.md. Read those before trusting it.
+# Follows Dremio's official OpenShift method: helm OCI chart + the two-file
+# overrides pattern (values-openshift-overrides.yaml FIRST), with useOpenShiftRoles
+# so the CHART creates the SCC RoleBindings (nonroot/nonroot-v2). See
+# docs/00-INSTALL-OPENSHIFT.md and docs/RUNBOOK.md.
 #
 # Usage:
-#   ./scripts/install.sh                       # ENV unset -> single 'dremio' ns, minimal values
-#   ENV=dev  ./scripts/install.sh              # namespace dremio-dev,  common + dev overlay
-#   ENV=qa   ./scripts/install.sh              # namespace dremio-qa,   common + qa overlay
-#   ENV=prod DREMIO_CHART_VERSION=26.0.0 ./scripts/install.sh
+#   ENV=dev  ./scripts/install.sh
+#   ENV=qa   ./scripts/install.sh
+#   ENV=prod CHART_VERSION=3.2.3 ./scripts/install.sh
 #
-# Environment overrides:
-#   ENV                    dev|qa|prod (selects layered values + default namespace)
-#   DREMIO_NAMESPACE       (default: dremio, or dremio-<ENV> when ENV is set)
-#   DREMIO_RELEASE         (default: dremio)
-#   DREMIO_CHART           (default: oci://quay.io/dremio/dremio-helm)
-#   DREMIO_CHART_VERSION   (default: unset -> latest; STRONGLY recommend pinning)
-#   DREMIO_VALUES          (override the values file list entirely, space-separated)
+# Env vars:
+#   ENV                 dev|qa|prod              (default: dev)
+#   DREMIO_NAMESPACE    (default: dremio-<ENV>)
+#   DREMIO_RELEASE      (default: dremio)
+#   DREMIO_CHART        (default: oci://quay.io/dremio/dremio-helm)
+#   CHART_VERSION       Helm CHART semver, e.g. 3.2.3 (NOT the 26.x app version)
 # =============================================================================
 set -euo pipefail
-cd "$(dirname "$0")/.."   # repo root
+cd "$(dirname "$0")/.."
 
-ENV="${ENV:-}"
+ENV="${ENV:-dev}"
+case "${ENV}" in dev|qa|prod) ;; *) echo "ENV must be dev|qa|prod"; exit 1;; esac
+NS="${DREMIO_NAMESPACE:-dremio-${ENV}}"
 RELEASE="${DREMIO_RELEASE:-dremio}"
 CHART="${DREMIO_CHART:-oci://quay.io/dremio/dremio-helm}"
-VERSION_ARG=()
-[ -n "${DREMIO_CHART_VERSION:-}" ] && VERSION_ARG=(--version "${DREMIO_CHART_VERSION}")
+VER_ARG=(); [ -n "${CHART_VERSION:-}" ] && VER_ARG=(--version "${CHART_VERSION}")
 
-# --- Resolve namespace + values files for the chosen environment -------------
-if [ -n "${ENV}" ]; then
-  case "${ENV}" in dev|qa|prod) ;; *) echo "ENV must be dev|qa|prod"; exit 1;; esac
-  NS="${DREMIO_NAMESPACE:-dremio-${ENV}}"
-  DEFAULT_VALUES="helm/values-common.yaml helm/values-${ENV}.yaml"
-else
-  NS="${DREMIO_NAMESPACE:-dremio}"
-  DEFAULT_VALUES="helm/values-openshift-minimal.yaml"
+# Official two-file overrides + our per-env layer (order matters: OpenShift first).
+VALUES=( -f helm/values-openshift-overrides.yaml
+         -f helm/values-common.yaml
+         -f "helm/values-${ENV}.yaml" )
+
+echo ">> Environment: ${ENV}   namespace: ${NS}   chart: ${CHART} ${CHART_VERSION:-(latest)}"
+
+echo ">> [1/6] Namespace..."
+oc create namespace "${NS}" --dry-run=client -o yaml | oc apply -f -
+
+echo ">> [2/6] OpenSearch node tuning (vm.max_map_count) — cluster-admin..."
+# Required because the OpenShift overrides disable the privileged init container.
+oc apply -f openshift/02-node-tuning-opensearch.yaml \
+  || echo "   (could not apply Tuned CR — ask a cluster-admin; see RUNBOOK Part B)"
+
+echo ">> [3/6] Checking for the Enterprise image pull secret..."
+if ! oc get secret dremio-pull-secret -n "${NS}" >/dev/null 2>&1; then
+  cat <<EOF
+   !! Secret 'dremio-pull-secret' not found in ${NS}.
+      The chart defaults to the Enterprise image on quay.io. Create it:
+        oc create secret docker-registry dremio-pull-secret \\
+          --docker-server=quay.io --docker-username='<user>' \\
+          --docker-password='<token>' -n ${NS}
+      (and set your license in helm/values-common.yaml). Continuing anyway...
+EOF
 fi
-read -r -a VALUES_FILES <<< "${DREMIO_VALUES:-$DEFAULT_VALUES}"
-VALUES_ARGS=(); for f in "${VALUES_FILES[@]}"; do VALUES_ARGS+=(--values "$f"); done
 
-# --- Apply an OpenShift manifest, rewriting namespace/SCC names per-env -------
-# When ENV is set we isolate each environment: namespace -> $NS, the SCC and its
-# bindings get an -${ENV} suffix, and ServiceAccount references point at $NS.
-kapply() {
-  local file="$1"
-  if [ -z "${ENV}" ]; then oc apply -f "${file}"; return; fi
-  sed -e "s|namespace: dremio$|namespace: ${NS}|g" \
-      -e "s|system:serviceaccount:dremio:dremio|system:serviceaccount:${NS}:dremio|g" \
-      -e "s|dremio-scc|dremio-scc-${ENV}|g" \
-      "${file}" | oc apply -f -
-}
-
-echo ">> Target environment: ${ENV:-<minimal>}   namespace: ${NS}"
-echo ">> Values: ${VALUES_FILES[*]}"
-
-echo ">> [1/6] Creating project, ServiceAccount, SCC and RBAC..."
-if [ -n "${ENV}" ]; then
-  oc create namespace "${NS}" --dry-run=client -o yaml | oc apply -f -
-else
-  oc apply -f openshift/01-namespace.yaml
-fi
-kapply openshift/02-serviceaccount.yaml
-# SCC + RBAC need cluster-admin. If this fails, ask an admin to apply these two.
-kapply openshift/03-scc.yaml
-kapply openshift/04-rbac.yaml
-
-echo ">> [2/6] (Reference) generating the chart's real default values for diffing..."
-helm show values "${CHART}" "${VERSION_ARG[@]}" > helm/values-reference.generated.yaml 2>/dev/null \
+echo ">> [4/6] (Reference) generating the chart's real default values..."
+helm show values "${CHART}" "${VER_ARG[@]}" > helm/values-reference.generated.yaml 2>/dev/null \
   && echo "   wrote helm/values-reference.generated.yaml" \
-  || echo "   (skipped: could not pull chart values - check registry access)"
+  || echo "   (skipped: could not pull chart — check quay.io / 'helm registry login quay.io')"
 
-echo ">> [3/6] Validating the install with a dry-run / template render..."
-helm upgrade --install "${RELEASE}" "${CHART}" "${VERSION_ARG[@]}" \
-  --namespace "${NS}" "${VALUES_ARGS[@]}" --dry-run >/dev/null
-echo "   dry-run OK"
+echo ">> [5/6] Dry-run validate, then install..."
+helm upgrade --install "${RELEASE}" "${CHART}" "${VER_ARG[@]}" \
+  --namespace "${NS}" "${VALUES[@]}" --dry-run >/dev/null && echo "   dry-run OK"
+helm upgrade --install "${RELEASE}" "${CHART}" "${VER_ARG[@]}" \
+  --namespace "${NS}" "${VALUES[@]}" --wait --timeout 30m
 
-echo ">> [4/6] Installing Dremio (this creates the StatefulSets)..."
-helm upgrade --install "${RELEASE}" "${CHART}" "${VERSION_ARG[@]}" \
-  --namespace "${NS}" "${VALUES_ARGS[@]}" --wait --timeout 20m
-
-echo ">> [5/6] Waiting for pods to become Ready..."
-oc rollout status statefulset -n "${NS}" --timeout=900s || true
+echo ">> [6/6] Pods + Web UI Route..."
 oc get pods -n "${NS}"
-
-echo ">> [6/6] Exposing the Web UI via an OpenShift Route..."
-SVC=$(oc get svc -n "${NS}" -o name 2>/dev/null | grep -E 'client|coordinator' | head -n1 | sed 's#service/##' || true)
-SVC="${SVC:-dremio-client}"
-sed -e "s/name: dremio-client/name: ${SVC}/" -e "s|namespace: dremio$|namespace: ${NS}|g" \
-  openshift/05-route-ui.yaml | oc apply -f -
-
+sed "s|namespace: dremio$|namespace: ${NS}|g" openshift/03-route-ui.yaml | oc apply -f -
 HOST=$(oc get route dremio-ui -n "${NS}" -o jsonpath='{.spec.host}' 2>/dev/null || true)
 echo
 echo "============================================================"
-echo " Dremio install complete  (env: ${ENV:-minimal}, ns: ${NS})"
-[ -n "${HOST}" ] && echo " Web UI:  https://${HOST}" || echo " Web UI route not found - check 'oc get route -n ${NS}'."
-echo " First-time login: open the URL and create the admin account."
+echo " Dremio install complete  (env: ${ENV}, ns: ${NS})"
+[ -n "${HOST}" ] && echo " Web UI:  https://${HOST}" || echo " Route not found - check 'oc get route -n ${NS}'."
+echo " First login: open the URL and create the admin account."
 echo "============================================================"
