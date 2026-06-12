@@ -36,6 +36,7 @@ dremio26x/
 ├── Makefile                           ← convenience targets (make help, ENV=dev|qa|prod)
 ├── docs/
 │   ├── 00-INSTALL-OPENSHIFT.md        ← MAIN spoon-fed install guide
+│   ├── RUNBOOK.md                     ← SCC + CRD execution runbook (admin ops)
 │   ├── ENVIRONMENTS.md                ← dev/qa/prod values design + comparison
 │   ├── PREREQUISITES.md               ← tools, cluster reqs, sizing, editions
 │   ├── ARCHITECTURE.md                ← components, diagrams, design rationale

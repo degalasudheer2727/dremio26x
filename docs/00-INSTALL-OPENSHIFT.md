@@ -138,6 +138,10 @@ oc auth can-i use scc/dremio-scc \
 > Not a cluster‑admin? Send `openshift/03-scc.yaml` and `04-rbac.yaml` to one.
 > They are safe: the SCC applies to a single ServiceAccount in one namespace,
 > grants no host access, and drops all Linux capabilities.
+>
+> **Admin doing the SCC and any CRDs as a standalone task?** Use the dedicated
+> [RUNBOOK.md](RUNBOOK.md) — it covers SCC + CRD apply/verify/upgrade/rollback
+> and the correct cluster-scoped ordering in isolation.
 
 ---
 
