@@ -48,6 +48,9 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: gitleaks/gitleaks-action@v2
         env:
+          # gitleaks-action v2 requires GITHUB_TOKEN to scan pull_request events
+          # (push events work without it). Auto-provided by Actions.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
 
   # ---------------------------------------------------------------------------
