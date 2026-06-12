@@ -1,0 +1,132 @@
+# =============================================================================
+# Dremio 26 (v3 chart) — PRODUCTION overlay
+# =============================================================================
+# The v3 chart DEFAULTS are already production-grade (coordinator 32 CPU/64 Gi,
+# 3 executors at 16 CPU/128 Gi, 3-node ZooKeeper/MongoDB/OpenSearch, cloud cache
+# on, MongoDB backups + PITR on). This overlay therefore mostly pins the things
+# you MUST own for prod: license, pull secret, object storage, dedicated node
+# pools, storage classes, and TLS. It aligns with Dremio's published production
+# sizing recommendations.
+#
+#   ENV=prod make install
+# =============================================================================
+
+cluster:
+  type: prod
+
+# -----------------------------------------------------------------------------
+# Coordinator — Dremio's recommended prod size: 32 vCPU / 64 Gi (chart default).
+# -----------------------------------------------------------------------------
+coordinator:
+  resources:
+    requests: { cpu: "32", memory: "64Gi" }
+    limits:   { cpu: "32", memory: "64Gi" }
+  count: 0                    # single master; scale-out coordinators optional (EE)
+  volumeSize: 512Gi
+  web:
+    tls:
+      enabled: true
+      secret: dremio-tls-secret-ui
+  nodeSelector:
+    dremio-node-type: coordinator
+  tolerations:
+    - { key: "dremio-dedicated", operator: "Equal", value: "coordinator", effect: "NoSchedule" }
+
+# -----------------------------------------------------------------------------
+# Executors — 16 vCPU / 128 Gi (1:8), 3 to start; scale `count` with workload.
+# -----------------------------------------------------------------------------
+executor:
+  resources:
+    requests: { cpu: "16", memory: "128Gi" }
+    limits:   { memory: "128Gi" }
+  count: 3
+  volumeSize: 128Gi
+  cloudCache:
+    enabled: true
+    volumes:
+      - size: 100Gi          # back with NVMe/SSD StorageClass
+  nodeSelector:
+    dremio-node-type: executor
+  tolerations:
+    - { key: "dremio-dedicated", operator: "Equal", value: "executor", effect: "NoSchedule" }
+
+# --- ZooKeeper quorum --------------------------------------------------------
+zookeeper:
+  count: 3
+  volumeSize: 32Gi
+
+# --- Catalog services --------------------------------------------------------
+catalog:
+  replicas: 2
+  externalAccess:
+    replicas: 2
+    tls:
+      enabled: true
+      secret: dremio-tls-secret-catalog
+catalogservices:
+  replicas: 2
+
+# --- MongoDB (catalog metadata) — 3-node replica set, backups + PITR ---------
+mongodb:
+  replicaCount: 3
+  storage:
+    resources:
+      requests:
+        storage: 512Gi
+  backup:
+    enabled: true
+    schedule: "0 0 * * *"
+    keep: 7
+
+# --- OpenSearch — 3-node cluster (chart default heap 10g) --------------------
+opensearch:
+  replicas: 3
+  volumeSize: "100Gi"
+
+# -----------------------------------------------------------------------------
+# Distributed storage — object storage, IAM/workload identity preferred.
+# -----------------------------------------------------------------------------
+distStorage:
+  type: "aws"
+  aws:
+    bucketName: "dremio-prod-dist"
+    path: "/"
+    region: "us-east-1"
+    tls: true
+    authentication: "metadata"        # IAM role / IRSA
+    # authentication: "accessKeySecret"
+    # credentials:
+    #   secretName: "dremio-prod-s3-creds"
+  # --- Azure ADLS Gen2 alternative ---
+  # type: "azureStorage"
+  # azureStorage:
+  #   accountName: "dremioprod"
+  #   filesystem: "dist"
+  #   path: "/"
+  #   authentication: "accessKey"
+  #   credentials:
+  #     secretName: "dremio-prod-adls-creds"
+  # --- GCS alternative ---
+  # type: "gcp"
+  # gcp:
+  #   bucketName: "dremio-prod-dist"
+  #   path: "/"
+  #   authentication: "auto"            # Workload Identity
+
+# -----------------------------------------------------------------------------
+# Iceberg catalog storage (separate bucket/prefix from distStorage).
+# -----------------------------------------------------------------------------
+# catalog:
+#   storage:
+#     type: s3
+#     location: "s3://dremio-prod-catalog/"
+#     s3:
+#       region: "us-east-1"
+#       useAccessKeys: false
+#       roleArn: "arn:aws:iam::<acct>:role/dremio-prod-catalog"
+
+# -----------------------------------------------------------------------------
+# StorageClass for PVCs — set explicitly in prod (SSD; NVMe for C3/spill).
+# AWS: gp3/io2 · Azure: managed-premium · GCP: pd-ssd
+# -----------------------------------------------------------------------------
+# storageClass: "gp3"

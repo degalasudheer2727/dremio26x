@@ -1,0 +1,100 @@
+# =============================================================================
+# Dremio 26 (v3 chart) — DEV overlay
+# =============================================================================
+# Smallest footprint that still runs the full v3 platform (coordinator,
+# executor, zookeeper, catalog, catalog-services, mongodb, opensearch, nats).
+# Single replicas, shrunken resources. Object storage is still REQUIRED.
+#
+#   ENV=dev make install
+#   # ->  helm ... -f values-openshift-overrides.yaml -f values-common.yaml -f values-dev.yaml
+# =============================================================================
+
+cluster:
+  type: dev
+
+# --- Coordinator (master) ----------------------------------------------------
+coordinator:
+  resources:
+    requests: { cpu: "2", memory: "8Gi" }
+    limits:   { cpu: "2", memory: "8Gi" }
+  count: 0
+  volumeSize: 32Gi
+  web:
+    tls:
+      enabled: false        # TLS terminated at the OpenShift Route (edge)
+
+# --- Executor ----------------------------------------------------------------
+executor:
+  resources:
+    requests: { cpu: "2", memory: "8Gi" }
+    limits:   { memory: "8Gi" }
+  count: 1
+  volumeSize: 32Gi
+  cloudCache:
+    enabled: false
+
+# --- ZooKeeper: single node (dev only — no quorum) ---------------------------
+zookeeper:
+  count: 1
+  volumeSize: 8Gi
+
+# --- Catalog (Iceberg REST catalog) ------------------------------------------
+catalog:
+  replicas: 1
+  resources:
+    requests: { cpu: "1", memory: "2Gi" }
+    limits:   { cpu: "1", memory: "2Gi" }
+  externalAccess:
+    replicas: 1
+
+catalogservices:
+  replicas: 1
+  resources:
+    requests: { cpu: "1", memory: "2Gi" }
+    limits:   { cpu: "1", memory: "2Gi" }
+
+# --- MongoDB (catalog metadata store): single replica for dev ----------------
+mongodb:
+  replicaCount: 1
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits:   { cpu: "1",    memory: "1Gi" }
+  storage:
+    resources:
+      requests:
+        storage: 32Gi
+  backup:
+    enabled: false           # no scheduled backups in dev
+
+# --- OpenSearch (semantic/search): single node, small heap -------------------
+opensearch:
+  replicas: 1
+  opensearchJavaOpts: "-Xms2g -Xmx2g"
+  volumeSize: "32Gi"
+  resources:
+    requests: { cpu: "1", memory: "4Gi" }
+    limits:   { cpu: "1", memory: "4Gi" }
+
+# --- NATS: single-node JetStream ---------------------------------------------
+nats:
+  config:
+    cluster:
+      replicas: 1
+
+# --- Distributed storage: object storage (REQUIRED) -------------------------
+# Dev example points at an in-cluster MinIO (S3-compatible). Replace endpoint/
+# bucket/secret for your environment. Credentials live in a Secret, not here.
+distStorage:
+  type: "aws"
+  aws:
+    bucketName: "dremio-dev-dist"
+    path: "/"
+    region: "us-east-1"
+    endpoint: "minio.minio.svc.cluster.local:9000"
+    tls: false
+    authentication: "accessKeySecret"
+    credentials:
+      secretName: "dremio-dev-s3-creds"
+
+# Use the cluster default StorageClass for PVCs.
+# storageClass: ""

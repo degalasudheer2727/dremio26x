@@ -1,0 +1,81 @@
+# =============================================================================
+# Dremio 26 (v3 chart) — QA / PRE-PROD overlay
+# =============================================================================
+# A smaller, faithful mirror of prod: quorum ZooKeeper/MongoDB/OpenSearch, real
+# object storage, TLS at the edge, but reduced resource sizes.
+#
+#   ENV=qa make install
+# =============================================================================
+
+cluster:
+  type: prod                 # behave like prod; chart's "prod" topology
+
+coordinator:
+  resources:
+    requests: { cpu: "8", memory: "32Gi" }
+    limits:   { cpu: "8", memory: "32Gi" }
+  count: 0
+  volumeSize: 128Gi
+
+executor:
+  resources:
+    requests: { cpu: "8", memory: "32Gi" }
+    limits:   { memory: "32Gi" }
+  count: 2
+  volumeSize: 128Gi
+  cloudCache:
+    enabled: true
+    volumes:
+      - size: 50Gi
+
+zookeeper:
+  count: 3
+  volumeSize: 16Gi
+
+catalog:
+  replicas: 1
+catalogservices:
+  replicas: 1
+
+mongodb:
+  replicaCount: 3
+  resources:
+    requests: { cpu: "1", memory: "2Gi" }
+    limits:   { cpu: "2", memory: "2Gi" }
+  storage:
+    resources:
+      requests:
+        storage: 128Gi
+  backup:
+    enabled: true
+
+opensearch:
+  replicas: 3
+  opensearchJavaOpts: "-Xms6g -Xmx6g"
+  volumeSize: "64Gi"
+  resources:
+    requests: { cpu: "2", memory: "10Gi" }
+    limits:   { cpu: "2", memory: "10Gi" }
+
+# --- Distributed storage: object storage ------------------------------------
+distStorage:
+  type: "aws"
+  aws:
+    bucketName: "dremio-qa-dist"
+    path: "/"
+    region: "us-east-1"
+    tls: true
+    authentication: "metadata"        # IAM role / IRSA; avoids inline keys
+    # authentication: "accessKeySecret"
+    # credentials:
+    #   secretName: "dremio-qa-s3-creds"
+
+# --- Catalog (Iceberg) storage location -------------------------------------
+# Separate from distStorage. Point at its own bucket/prefix.
+# catalog:
+#   storage:
+#     type: s3
+#     location: "s3://dremio-qa-catalog/"
+#     s3:
+#       region: "us-east-1"
+#       useAccessKeys: false

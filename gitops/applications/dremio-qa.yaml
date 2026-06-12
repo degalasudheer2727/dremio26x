@@ -1,0 +1,43 @@
+# -----------------------------------------------------------------------------
+# Argo CD Application — Dremio QA (auto-sync, no auto-prune)
+# -----------------------------------------------------------------------------
+# QA tracks the same branch but is more conservative: it auto-syncs but does NOT
+# prune automatically and does NOT self-heal, so accidental drift is visible
+# before removal. Promote a change to QA by it passing CI + merging.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dremio-qa
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dremio
+  sources:
+    - repoURL: https://github.com/degalasudheer2727/dremio26x.git
+      targetRevision: main
+      ref: values
+    - repoURL: quay.io/dremio
+      chart: dremio-helm
+      targetRevision: "3.2.3"
+      helm:
+        releaseName: dremio
+        skipCrds: true               # CRDs pre-staged by admin in shared cluster
+        valueFiles:
+          - $values/helm/values-openshift-overrides.yaml
+          - $values/helm/values-common.yaml
+          - $values/helm/values-qa.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dremio-qa
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 30s, factor: 2, maxDuration: 5m }

@@ -1,0 +1,205 @@
+# =============================================================================
+# Dremio 26 (v3 Helm chart) — OFFICIAL OpenShift overrides
+# =============================================================================
+# Source of truth: this is Dremio's own `values-openshift-overrides.yaml` that
+# ships with the v3 chart (oci://quay.io/dremio/dremio-helm). Per Dremio's
+# official guide it MUST be supplied to every OpenShift install, layered with
+# your environment overrides:
+#
+#   helm install dremio oci://quay.io/dremio/dremio-helm \
+#     --version <CHART_VERSION e.g. 3.2.3> \
+#     --values helm/values-openshift-overrides.yaml \
+#     --values helm/values-common.yaml \
+#     --values helm/values-<env>.yaml \
+#     --wait
+#
+# WHAT IT DOES
+#  * useOpenShiftRoles: true  -> the chart RENDERS RoleBindings that grant its
+#    ServiceAccounts (dremio-coordinator, dremio-executor, engine SAs, ...) the
+#    right to use OpenShift's built-in `nonroot` and `nonroot-v2` SCCs. You do
+#    NOT need a custom SCC; OpenShift admits the pods under nonroot-v2.
+#  * Strips hard-coded runAsUser/fsGroup for components that tolerate an
+#    arbitrary (OpenShift-assigned) UID (engine operator, catalog, opensearch,
+#    zookeeper, mongodb hooks) while keeping fixed UID 999 where required
+#    (coordinator).
+#  * opensearch.setVMMaxMapCount: false  -> no privileged init container; you
+#    MUST instead set vm.max_map_count=262144 on the nodes via the Node Tuning
+#    Operator (see openshift/03-node-tuning-opensearch.yaml).
+#  * Disables natsBox (doesn't work cleanly on OpenShift).
+#
+# Keep this file in sync with your pinned chart version:
+#   helm show values oci://quay.io/dremio/dremio-helm --version <v> | less
+# =============================================================================
+
+# Natsbox doesn't work well without a lot of customization on openshift.
+nats:
+  natsBox:
+    enabled: false
+
+useOpenShiftRoles: true
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  privileged: false
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+
+coordinator:
+  podSecurityContext:
+    fsGroup: 999
+    fsGroupChangePolicy: OnRootMismatch
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    privileged: false
+    readOnlyRootFilesystem: false
+    runAsGroup: 999
+    runAsNonRoot: true
+    runAsUser: 999
+    seccompProfile:
+      type: RuntimeDefault
+
+engine:
+  operator:
+    podSecurityContext:
+      runAsUser: null
+      runAsGroup: null
+      fsGroup: null
+      fsGroupChangePolicy: Always
+    containerSecurityContext:
+      runAsUser: null
+      runAsGroup: null
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      privileged: false
+      readOnlyRootFilesystem: false
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+
+catalog:
+  containerSecurityContext:
+    runAsUser: null
+    runAsGroup: null
+    runAsNonRoot: true
+    privileged: false
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  podSecurityContext:
+    fsGroup: null
+    seccompProfile:
+      type: RuntimeDefault
+
+mongodb:
+  waitContainer:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+  podSecurityContext:
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 999
+    fsGroupChangePolicy: OnRootMismatch
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    privileged: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    capabilities:
+      drop:
+        - ALL
+  backup:
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsGroup: null
+      runAsUser: null
+
+mongodbHooks:
+  podSecurityContext:
+    fsGroup: null
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsGroup: null
+    runAsUser: null
+
+mongodbOperator:
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: null
+    runAsGroup: null
+    fsGroup: null
+    seccompProfile:
+      type: RuntimeDefault
+
+opensearch:
+  setVMMaxMapCount: false
+  podSecurityContext:
+    runAsUser: null
+    runAsGroup: null
+    fsGroup: null
+  containerSecurityContext:
+    runAsUser: null
+    runAsGroup: null
+    readOnlyRootFilesystem: true
+    privileged: false
+  clusterPodSecurityContext:
+    runAsUser: null
+    fsGroup: null
+
+opensearchOperator:
+  manager:
+    extraEnv:
+      - name: SKIP_INIT_CONTAINER
+        value: "true"
+
+zookeeper:
+  podSecurityContext:
+    runAsUser: null
+    fsGroup: null
+    runAsNonRoot: true
+  containerSecurityContext:
+    privileged: false
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    runAsUser: null
+    runAsGroup: null
+    capabilities:
+      drop:
+        - ALL

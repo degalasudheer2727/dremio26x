@@ -1,0 +1,40 @@
+# -----------------------------------------------------------------------------
+# Dremio 26 on OpenShift - Route for the Web UI (port 9047)
+# -----------------------------------------------------------------------------
+# OpenShift uses "Route" objects instead of Kubernetes Ingress to expose
+# services on a public hostname. This Route exposes the Dremio web UI.
+#
+# The v3 chart creates a Service named "dremio-client" with named ports
+# web (9047), client (31010) and flight (32010) — verified against the chart.
+# This Route targets the "web" port. Confirm the service exists after install:
+#     oc get svc dremio-client -n dremio
+#
+# This Route terminates TLS at the OpenShift router (edge) and redirects HTTP
+# to HTTPS. Dremio inside the cluster keeps speaking plain HTTP on 9047 (dev).
+# For end-to-end TLS, set coordinator.web.tls.enabled=true in the env values
+# (qa/prod do this) and switch this Route's termination to "reencrypt".
+#
+# Apply with:
+#   oc apply -f openshift/03-route-ui.yaml
+#
+# Then get the URL with:
+#   oc get route dremio-ui -n dremio -o jsonpath='{.spec.host}{"\n"}'
+# -----------------------------------------------------------------------------
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: dremio-ui
+  namespace: dremio
+  labels:
+    app.kubernetes.io/part-of: dremio
+spec:
+  to:
+    kind: Service
+    name: dremio-client
+    weight: 100
+  port:
+    targetPort: web        # named port on the client service (9047)
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

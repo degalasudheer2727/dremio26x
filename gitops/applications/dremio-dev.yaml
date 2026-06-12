@@ -1,0 +1,46 @@
+# -----------------------------------------------------------------------------
+# Argo CD Application — Dremio DEV (auto-synced)
+# -----------------------------------------------------------------------------
+# Multi-source: source #1 is THIS git repo (provides the layered values files
+# via the `$values` ref); source #2 is the Dremio OCI Helm chart. Argo renders
+# the chart with our three values files, exactly like the official two-file
+# (+env) install. Requires Argo CD >= 2.6 (OpenShift GitOps 1.8+).
+#
+# Dev auto-syncs and self-heals: merging to the tracked branch deploys.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dremio-dev
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dremio
+  sources:
+    - repoURL: https://github.com/degalasudheer2727/dremio26x.git
+      targetRevision: main           # <-- set to your values branch
+      ref: values
+    - repoURL: quay.io/dremio        # OCI registry (repo must have enableOCI)
+      chart: dremio-helm
+      targetRevision: "3.2.3"        # Helm CHART version (not the 26.x app tag)
+      helm:
+        releaseName: dremio
+        skipCrds: false              # let the chart install CRDs in dev
+        valueFiles:
+          - $values/helm/values-openshift-overrides.yaml
+          - $values/helm/values-common.yaml
+          - $values/helm/values-dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dremio-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 30s, factor: 2, maxDuration: 5m }

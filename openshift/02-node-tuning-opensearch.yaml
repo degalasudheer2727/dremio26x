@@ -1,0 +1,47 @@
+# -----------------------------------------------------------------------------
+# Dremio 26 on OpenShift — OpenSearch node tuning (REQUIRED)
+# -----------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------
+# The Dremio v3 chart runs an embedded OpenSearch cluster (for semantic search /
+# catalog features). OpenSearch requires the host kernel setting
+# `vm.max_map_count >= 262144`.
+#
+# On vanilla Kubernetes the chart sets this with a PRIVILEGED init container
+# (opensearch.setVMMaxMapCount: true). OpenShift forbids privileged init
+# containers under the default SCCs, so Dremio's official OpenShift overrides
+# set `opensearch.setVMMaxMapCount: false` — which means YOU must raise the
+# value on the nodes yourself. This is the supported way to do that: the
+# Node Tuning Operator (built into OpenShift).
+#
+# Apply with (cluster-admin):
+#   oc apply -f openshift/02-node-tuning-opensearch.yaml
+#
+# Then label the OpenSearch pods (the chart labels them; this Tuned profile
+# matches on that pod label) OR broaden `recommend.match` to your executor/
+# search node pool. Verify after pods schedule:
+#   oc debug node/<node> -- chroot /host sysctl vm.max_map_count   # >= 262144
+#
+# NOTE: If you instead dedicate a node pool to Dremio, you can match on a node
+# label (machineConfigPool / node role) rather than the pod label.
+# -----------------------------------------------------------------------------
+apiVersion: tuned.openshift.io/v1
+kind: Tuned
+metadata:
+  name: openshift-opensearch
+  namespace: openshift-cluster-node-tuning-operator
+spec:
+  profile:
+    - name: openshift-opensearch
+      data: |
+        [main]
+        summary=Optimize nodes running Dremio's OpenSearch on OpenShift
+        include=openshift-node
+        [sysctl]
+        vm.max_map_count=262144
+  recommend:
+    - match:
+        - label: tuned.openshift.io/opensearch
+          type: pod
+      priority: 20
+      profile: openshift-opensearch

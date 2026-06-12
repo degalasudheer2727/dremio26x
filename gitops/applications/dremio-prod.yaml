@@ -1,0 +1,43 @@
+# -----------------------------------------------------------------------------
+# Argo CD Application — Dremio PROD (MANUAL sync — no automation)
+# -----------------------------------------------------------------------------
+# Production is intentionally NOT auto-synced. A merge makes Argo CD show the
+# app "OutOfSync"; a human triggers the sync (UI or `argocd app sync dremio-prod`)
+# during a change window. This is the safe GitOps promotion gate.
+#
+# Pin targetRevision to an immutable git tag/commit for prod (not a moving
+# branch) so you always know exactly what is deployed.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dremio-prod
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dremio
+  sources:
+    - repoURL: https://github.com/degalasudheer2727/dremio26x.git
+      targetRevision: main           # <-- pin to a release tag, e.g. v26.1.3-1
+      ref: values
+    - repoURL: quay.io/dremio
+      chart: dremio-helm
+      targetRevision: "3.2.3"
+      helm:
+        releaseName: dremio
+        skipCrds: true               # CRDs pre-staged/upgraded by admin (RUNBOOK B)
+        valueFiles:
+          - $values/helm/values-openshift-overrides.yaml
+          - $values/helm/values-common.yaml
+          - $values/helm/values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dremio-prod
+  syncPolicy:
+    # No `automated:` block -> manual sync only.
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  # Optional: only allow syncs during a maintenance window (uncomment + tune).
+  # ignoreDifferences: []
