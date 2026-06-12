@@ -1,0 +1,44 @@
+# =============================================================================
+# Dremio 26 - COMMON base values (shared by dev / qa / prod)
+# =============================================================================
+# Chart: oci://quay.io/dremio/dremio-helm  (Dremio 26+ "v3" chart)
+#
+# This file holds settings that are IDENTICAL across every environment. Each
+# environment then layers its own overlay ON TOP of this file. Helm merges
+# multiple --values files left-to-right, so the install command is always:
+#
+#   helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
+#       --version <CHART_VERSION> \
+#       --namespace <ns> \
+#       --values helm/values-common.yaml \
+#       --values helm/values-<env>.yaml
+#
+# (The scripts/Makefile do this for you via ENV=dev|qa|prod.)
+#
+# ⚠️ Reconcile key names against your exact chart version:
+#   helm show values oci://quay.io/dremio/dremio-helm --version <v> \
+#       > helm/values-reference.generated.yaml
+# =============================================================================
+
+# Pin an explicit X.Y.Z image tag in EVERY environment (set per-env so dev can
+# trail prod). NEVER use "latest"/"X.Y".
+image:
+  pullPolicy: IfNotPresent
+
+# Use the dedicated ServiceAccount (openshift/02-serviceaccount.yaml) so the
+# custom SCC (fixed UID 999) applies. Same in all environments.
+serviceAccount: "dremio"
+
+# Web UI / client / flight ports are the same everywhere; TLS is toggled per-env.
+coordinator:
+  web:
+    port: 9047
+  client:
+    port: 31010
+  flight:
+    port: 32010
+  # Do NOT set runAsUser/fsGroup on OpenShift — the SCC injects UID/GID 999.
+
+executor:
+  engines:
+    - "default"

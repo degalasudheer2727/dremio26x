@@ -1,0 +1,142 @@
+# =============================================================================
+# Dremio 26 - PRODUCTION overlay  (layer ON TOP of values-common.yaml)
+# =============================================================================
+# Aligned with Dremio's PRODUCTION recommendations:
+#   * 3-node ZooKeeper quorum (HA coordination)
+#   * Production-sized coordinator + executors (≈16 vCPU / ~120 Gi each)
+#   * Cloud Cache (C3) enabled on fast/NVMe storage
+#   * Distributed storage on OBJECT STORAGE (S3 / ADLS Gen2 / GCS) — never local
+#   * End-to-end TLS
+#   * Guaranteed QoS (requests == limits), pod anti-affinity, zone spread
+#   * Dedicated node pools via nodeSelector + tolerations
+#   * Enterprise image + pull secret
+#
+# Install:
+#   ENV=prod make install             # or:
+#   helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
+#     --version 26.0.0 -n dremio-prod \
+#     -f helm/values-common.yaml -f helm/values-prod.yaml \
+#     --wait --timeout 30m
+#
+# MANDATORY before prod install:
+#   1. Reconcile keys: helm show values ... > helm/values-reference.generated.yaml
+#   2. Provision the object-storage bucket + access (IAM role / workload identity).
+#   3. Create the Enterprise pull secret and license secret.
+#   4. Confirm dedicated node pools exist and are labeled/tainted as below.
+#   5. Read docs/ENVIRONMENTS.md (PodDisruptionBudget + backup notes).
+# =============================================================================
+
+# Enterprise image + pull secret (production runs Enterprise).
+image:
+  registry: quay.io
+  repository: dremio/dremio-enterprise
+  tag: "26.0.0"                 # pin the exact validated build
+  pullPolicy: IfNotPresent
+  pullSecrets:
+    - dremio-pull-secret
+
+# -----------------------------------------------------------------------------
+# Coordinator (master)
+# -----------------------------------------------------------------------------
+coordinator:
+  cpu: 16
+  memory: 122880                # MiB (~120 Gi)
+  count: 0                      # single master. Raise to add scale-out
+                                # (secondary) coordinators for high concurrency
+                                # — Enterprise feature.
+  volumeSize: 256Gi             # RocksDB metadata; back this up (see ENVIRONMENTS.md)
+  web:
+    tls:
+      enabled: true
+  client:
+    tls:
+      enabled: true
+  flight:
+    tls:
+      enabled: true
+  # Pin coordinators to a dedicated node pool.
+  nodeSelector:
+    dremio-node-type: coordinator
+  tolerations:
+    - key: "dremio-dedicated"
+      operator: "Equal"
+      value: "coordinator"
+      effect: "NoSchedule"
+
+# -----------------------------------------------------------------------------
+# Executors (the query engine)
+# -----------------------------------------------------------------------------
+executor:
+  cpu: 16
+  memory: 122880                # MiB (~120 Gi)
+  count: 3                      # scale out as workload grows
+  volumeSize: 128Gi
+  cloudCache:
+    enabled: true
+    volumeSize: 100Gi           # C3 cache — back with NVMe/SSD StorageClass
+    # storageClass: "nvme-ssd"
+  # Spread executors across nodes/zones; never co-locate two on one node.
+  antiAffinity: "hard"
+  nodeSelector:
+    dremio-node-type: executor
+  tolerations:
+    - key: "dremio-dedicated"
+      operator: "Equal"
+      value: "executor"
+      effect: "NoSchedule"
+
+# -----------------------------------------------------------------------------
+# ZooKeeper — 3-node quorum for HA
+# -----------------------------------------------------------------------------
+zookeeper:
+  image: zookeeper:3.8.4-jre-17
+  count: 3
+  cpu: 1
+  memory: 4096                  # MiB (4 Gi)
+  volumeSize: 32Gi
+  antiAffinity: "hard"          # one ZK per node so a node loss keeps quorum
+
+# -----------------------------------------------------------------------------
+# Distributed storage — OBJECT STORAGE (required for production)
+# -----------------------------------------------------------------------------
+# Pick ONE backend. Strongly prefer IAM role / workload identity over static
+# keys; if keys are unavoidable, keep them in a Kubernetes Secret, NOT here.
+distStorage:
+  type: "aws"
+  aws:
+    bucketName: "dremio-prod-dist"
+    path: "/"
+    authentication: "metadata"            # IAM role / IRSA
+    # --- static keys via Secret (less preferred) ---
+    # authentication: "accessKeySecret"
+    # credentials:
+    #   secretName: "dremio-prod-s3-creds"
+  # --- Azure ADLS Gen2 example ---
+  # type: "azureStorage"
+  # azureStorage:
+  #   accountName: "dremioprod"
+  #   filesystem: "dist"
+  #   path: "/"
+  #   credentials:
+  #     secretName: "dremio-prod-adls-creds"
+  # --- Google Cloud Storage example ---
+  # type: "gcp"
+  # gcp:
+  #   bucketName: "dremio-prod-dist"
+  #   path: "/"
+  #   authentication: "auto"              # Workload Identity
+
+# -----------------------------------------------------------------------------
+# StorageClass for metadata/scratch PVCs (must be reliable; ideally SSD).
+# -----------------------------------------------------------------------------
+storageClass: ""                # set explicitly in prod (do not rely on default)
+
+# -----------------------------------------------------------------------------
+# Production hardening notes (keys vary by chart version — reconcile first):
+#   * Zone spread: add topologySpreadConstraints (topologyKey:
+#     topology.kubernetes.io/zone) for coordinator + executors.
+#   * PodDisruptionBudget: maintain quorum/availability during node drains
+#     (ZK minAvailable: 2). A template is in docs/ENVIRONMENTS.md.
+#   * License: provide the Enterprise license via the chart's license value or a
+#     Secret per the generated reference.
+# -----------------------------------------------------------------------------

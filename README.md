@@ -33,15 +33,20 @@ login.
 ```
 dremio26x/
 ├── README.md                          ← you are here
-├── Makefile                           ← convenience targets (make help)
+├── Makefile                           ← convenience targets (make help, ENV=dev|qa|prod)
 ├── docs/
 │   ├── 00-INSTALL-OPENSHIFT.md        ← MAIN spoon-fed install guide
+│   ├── ENVIRONMENTS.md                ← dev/qa/prod values design + comparison
 │   ├── PREREQUISITES.md               ← tools, cluster reqs, sizing, editions
 │   ├── ARCHITECTURE.md                ← components, diagrams, design rationale
 │   ├── TROUBLESHOOTING.md             ← symptom → fix playbook
 │   └── UNINSTALL.md                   ← teardown + upgrade procedure
 ├── helm/
-│   └── values-openshift-minimal.yaml  ← minimal v3-chart values override
+│   ├── values-common.yaml             ← shared base (layered under each env)
+│   ├── values-dev.yaml                ← dev overlay  (single node, local PVC, OSS)
+│   ├── values-qa.yaml                 ← qa overlay   (smaller mirror of prod)
+│   ├── values-prod.yaml               ← prod overlay (Dremio production setup)
+│   └── values-openshift-minimal.yaml  ← single-file POC profile (≈ common+dev)
 ├── openshift/
 │   ├── 01-namespace.yaml              ← project/namespace
 │   ├── 02-serviceaccount.yaml         ← dedicated ServiceAccount
@@ -56,6 +61,28 @@ dremio26x/
 ```
 
 ---
+
+## Environments: dev / qa / prod
+
+Values are designed as a shared base plus per-environment overlays
+(`values-common.yaml` + `values-<env>.yaml`), installed into separate
+namespaces (`dremio-dev` / `dremio-qa` / `dremio-prod`):
+
+| Env  | Topology                                   | Storage        | Edition     | TLS / HA |
+|------|--------------------------------------------|----------------|-------------|----------|
+| dev  | 1 coord · 1 exec · 1 ZK (2 CPU/8 Gi)       | local PVC      | OSS (free)  | edge TLS, no HA |
+| qa   | 1 coord · 2 exec · 3 ZK (smaller-than-prod)| object storage | Enterprise* | e2e TLS, quorum |
+| prod | 1 coord · 3 exec · 3 ZK (~16 CPU/120 Gi)   | object storage | Enterprise  | e2e TLS, quorum, anti-affinity, dedicated node pools |
+
+```bash
+make install ENV=dev      # or qa / prod
+make dry-run ENV=prod     # render only, no changes
+make status  ENV=qa
+```
+
+**Production aligns with Dremio's recommended production setup** — see
+[docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md) for the full comparison, rationale,
+prod prerequisites checklist, and a PodDisruptionBudget template.
 
 ## Key facts about Dremio 26 on Kubernetes
 

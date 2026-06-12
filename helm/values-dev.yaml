@@ -1,0 +1,60 @@
+# =============================================================================
+# Dremio 26 - DEV overlay  (layer ON TOP of values-common.yaml)
+# =============================================================================
+# Goal: smallest thing that runs. Single of everything, local PVC storage, OSS
+# image, no TLS, no HA. Fast to spin up and tear down; data is disposable.
+#
+# Install:
+#   ENV=dev make install              # or:
+#   helm upgrade --install dremio oci://quay.io/dremio/dremio-helm \
+#     --version 26.0.0 -n dremio-dev \
+#     -f helm/values-common.yaml -f helm/values-dev.yaml
+# =============================================================================
+
+# Free OSS image — no license required.
+image:
+  registry: docker.io
+  repository: dremio/dremio-oss
+  tag: "26.0.0"            # dev may trail prod; verify the tag exists
+
+# --- Coordinator: 1 node, also the master -----------------------------------
+coordinator:
+  cpu: 2
+  memory: 8192             # MiB (8 Gi)
+  count: 0                 # no secondary coordinators
+  volumeSize: 32Gi
+  web:
+    tls:
+      enabled: false       # TLS terminated at the edge Route
+  client:
+    tls:
+      enabled: false
+  flight:
+    tls:
+      enabled: false
+
+# --- Executor: 1 node, no cloud cache ----------------------------------------
+executor:
+  cpu: 2
+  memory: 8192             # MiB (8 Gi)
+  count: 1
+  volumeSize: 32Gi
+  cloudCache:
+    enabled: false
+
+# --- ZooKeeper: single node (NO quorum — fine for dev only) ------------------
+zookeeper:
+  image: zookeeper:3.8.4-jre-17
+  count: 1
+  cpu: 0.5
+  memory: 1024
+  volumeSize: 8Gi
+
+# --- Distributed storage: local PVC (no cloud account needed) ----------------
+distStorage:
+  type: "local"
+  local:
+    volumeSize: 64Gi
+
+# Use the cluster default StorageClass.
+storageClass: ""

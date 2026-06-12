@@ -192,6 +192,13 @@ less helm/values-reference.generated.yaml
 
 ---
 
+> **Deploying dev/qa/prod instead of a one-off POC?** This walk-through uses the
+> single-file `values-openshift-minimal.yaml`. For real environments use the
+> layered `values-common.yaml` + `values-<env>.yaml` files and per-env
+> namespaces (`make install ENV=dev|qa|prod`). See
+> [ENVIRONMENTS.md](ENVIRONMENTS.md) — prod there follows Dremio's production
+> recommendations.
+
 ## 7. Review the minimal values override
 
 Open [`helm/values-openshift-minimal.yaml`](../helm/values-openshift-minimal.yaml)
