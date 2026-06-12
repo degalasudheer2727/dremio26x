@@ -1,0 +1,26 @@
+# yamllint config for the Dremio OpenShift deployment artifacts.
+# Relaxed where Helm/OpenShift conventions differ from strict YAML style.
+extends: default
+rules:
+  line-length:
+    max: 160
+    level: warning
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  document-start: disable
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  indentation:
+    spaces: 2
+    indent-sequences: whatever    # vendored official file mixes sequence styles
+  # Allow column-aligned values (requests:/limits:) and aligned flow maps.
+  colons:
+    max-spaces-after: -1
+  commas:
+    max-spaces-after: -1
+  braces:
+    max-spaces-inside: 1          # allow { cpu: "2", memory: "8Gi" } flow maps
+ignore: |
+  helm/values-reference.generated.yaml

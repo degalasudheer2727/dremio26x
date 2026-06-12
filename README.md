@@ -44,12 +44,18 @@ dremio26x/
 ├── Makefile                             ← make help, ENV=dev|qa|prod
 ├── docs/
 │   ├── 00-INSTALL-OPENSHIFT.md          ← MAIN spoon-fed install guide
+│   ├── CICD.md                          ← GitHub Actions CI + Argo CD GitOps CD
 │   ├── RUNBOOK.md                       ← SCC (useOpenShiftRoles) + CRD/operator runbook
 │   ├── ENVIRONMENTS.md                  ← dev/qa/prod values design + comparison
 │   ├── PREREQUISITES.md                 ← tools, cluster reqs, sizing, editions
 │   ├── ARCHITECTURE.md                  ← v3 platform components + rationale
 │   ├── TROUBLESHOOTING.md               ← symptom → fix playbook
 │   └── UNINSTALL.md                     ← teardown + upgrade procedure
+├── .github/workflows/ci.yaml            ← CI: lint, render, kubeconform, gitleaks
+├── gitops/                              ← Argo CD GitOps (app-of-apps, per-env Apps)
+│   ├── bootstrap/app-of-apps.yaml       ← the one manifest an admin applies
+│   ├── projects/dremio-project.yaml     ← Argo CD AppProject
+│   └── applications/                    ← dremio-{prereqs,dev,qa,prod}.yaml
 ├── helm/
 │   ├── values-openshift-overrides.yaml  ← Dremio's OFFICIAL OpenShift overrides (layer FIRST)
 │   ├── values-common.yaml               ← image / license / pull secret / service type
@@ -88,6 +94,24 @@ make status  ENV=qa
 
 **Production aligns with Dremio's recommended production sizing** — see
 [docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md).
+
+## CI/CD native
+
+- **CI (GitHub Actions, `.github/workflows/ci.yaml`):** on every PR — `yamllint`
+  + `shellcheck`, `gitleaks` secret scan, `helm template` the real chart with
+  the layered values for **all three envs**, and `kubeconform` schema-validation.
+- **CD (Argo CD GitOps, `gitops/`):** apply one app-of-apps and the cluster
+  reconciles from git — **dev** auto-syncs, **qa** auto-syncs without prune,
+  **prod** is a **manual sync** promotion gate. Each env is a multi-source
+  Application (OCI Helm chart + this repo's values).
+
+```bash
+# bootstrap GitOps (after installing the OpenShift GitOps operator):
+argocd repo add quay.io/dremio --type helm --enable-oci --username '<u>' --password '<t>'
+oc apply -f gitops/bootstrap/app-of-apps.yaml
+```
+
+Full details, promotion flow, and secret handling: **[docs/CICD.md](docs/CICD.md)**.
 
 ## Key facts about Dremio 26 on OpenShift
 

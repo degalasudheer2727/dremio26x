@@ -1,0 +1,141 @@
+# =============================================================================
+# CI — validate the Dremio 26 OpenShift deployment artifacts on every PR/push
+# =============================================================================
+# This repo holds Helm VALUES + OpenShift manifests + GitOps definitions (not a
+# chart of its own), so "CI" = lint everything, render the real chart with our
+# layered values for all three environments, schema-validate the output, scan
+# for secrets, and confirm the pinned chart version resolves.
+#
+# The Dremio chart/images live on quay.io. Chart pull/render runs only if the
+# repo has QUAY_USERNAME/QUAY_TOKEN secrets; otherwise those steps are skipped
+# (the lint/scan/static checks always run and gate the PR).
+# =============================================================================
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "claude/**"]
+  workflow_dispatch:
+
+env:
+  CHART: oci://quay.io/dremio/dremio-helm
+  CHART_VERSION: "3.2.3"          # keep in sync with helm/ + docs
+  ENVS: "dev qa prod"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  lint:
+    name: yamllint + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: yamllint
+        run: |
+          pipx install yamllint || pip install yamllint
+          yamllint -c .yamllint.yaml helm/ openshift/ gitops/ .github/
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh
+
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    name: gitleaks (no committed secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+  # ---------------------------------------------------------------------------
+  values-structure:
+    name: values files parse + no secrets inline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: All values/manifests are valid YAML
+        run: |
+          python3 - <<'PY'
+          import glob, yaml, sys
+          bad = 0
+          for f in glob.glob("helm/*.yaml") + glob.glob("openshift/*.yaml") + glob.glob("gitops/**/*.yaml", recursive=True):
+              try:
+                  list(yaml.safe_load_all(open(f)))
+              except Exception as e:
+                  print(f"::error file={f}::{e}"); bad = 1
+          sys.exit(bad)
+          PY
+      - name: Fail if a license/credential looks committed
+        run: |
+          if grep -RInE 'license:\s*"[A-Za-z0-9+/]{20,}"|(accessKey|secretKey|privateKey)\s*:\s*["'\'']?[A-Za-z0-9/+]{16,}' helm/; then
+            echo "::error::Looks like a secret/license is committed in helm/. Use a Secret + --set-file instead."; exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  render:
+    name: helm template + kubeconform (per env)
+    runs-on: ubuntu-latest
+    needs: [lint, values-structure]
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, qa, prod]
+    env:
+      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with: { version: "v3.16.3" }
+      - name: Skip if no quay credentials
+        id: gate
+        run: |
+          if [ -z "${QUAY_USERNAME}" ]; then
+            echo "no QUAY_USERNAME secret set — skipping chart render"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: helm registry login
+        if: steps.gate.outputs.skip == 'false'
+        run: echo "${QUAY_TOKEN}" | helm registry login quay.io -u "${QUAY_USERNAME}" --password-stdin
+      - name: Reconcile our keys against the chart defaults
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          helm show values "${CHART}" --version "${CHART_VERSION}" > /tmp/ref.yaml
+          echo "Generated reference for chart ${CHART_VERSION} (top-level keys):"
+          python3 -c "import yaml;print('\n'.join(sorted(yaml.safe_load(open('/tmp/ref.yaml')).keys())))"
+      - name: helm template (${{ matrix.env }})
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          helm template dremio "${CHART}" --version "${CHART_VERSION}" \
+            --namespace "dremio-${{ matrix.env }}" \
+            -f helm/values-openshift-overrides.yaml \
+            -f helm/values-common.yaml \
+            -f "helm/values-${{ matrix.env }}.yaml" \
+            > "/tmp/rendered-${{ matrix.env }}.yaml"
+          echo "rendered $(grep -c '^kind:' /tmp/rendered-${{ matrix.env }}.yaml) objects"
+      - name: kubeconform (schema validate rendered manifests)
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform && sudo mv kubeconform /usr/local/bin/
+          kubeconform -strict -ignore-missing-schemas -summary \
+            "/tmp/rendered-${{ matrix.env }}.yaml"
+
+  # ---------------------------------------------------------------------------
+  validate-openshift-manifests:
+    name: kubeconform (openshift/ static manifests)
+    runs-on: ubuntu-latest
+    needs: [values-structure]
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform && sudo mv kubeconform /usr/local/bin/
+          # Route + Tuned are OpenShift CRDs -> ignore missing schemas for those.
+          kubeconform -ignore-missing-schemas -summary openshift/*.yaml gitops/**/*.yaml

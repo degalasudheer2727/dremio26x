@@ -1,0 +1,38 @@
+# -----------------------------------------------------------------------------
+# Argo CD "app of apps" — the single thing a cluster-admin applies to bootstrap
+# -----------------------------------------------------------------------------
+# Applying THIS one Application makes Argo CD manage the AppProject and all the
+# Dremio environment Applications declaratively from git. After this, you never
+# `kubectl apply` Dremio again — you change git and Argo reconciles.
+#
+# Bootstrap (one time, after installing the OpenShift GitOps / Argo CD operator):
+#   oc apply -f gitops/bootstrap/app-of-apps.yaml
+#
+# It points at the gitops/ directory recursively, which contains the AppProject
+# (projects/) and the per-env Applications (applications/).
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dremio-bootstrap
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/degalasudheer2727/dremio26x.git
+    targetRevision: main
+    path: gitops
+    directory:
+      recurse: true
+      exclude: "bootstrap/*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ApplyOutOfSyncOnly=true

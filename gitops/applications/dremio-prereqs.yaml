@@ -1,0 +1,32 @@
+# -----------------------------------------------------------------------------
+# Argo CD Application — cluster prerequisites (shared, env-agnostic)
+# -----------------------------------------------------------------------------
+# Syncs the cluster-scoped prerequisites that are NOT part of the Helm release:
+# currently the OpenSearch Node Tuning (vm.max_map_count) Tuned CR. Uses a plain
+# directory source over the repo's openshift/ folder, including ONLY the tuning
+# manifest (Routes/Namespace are per-env and handled elsewhere).
+#
+# Auto-synced because it is stable and required before any env can run OpenSearch.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dremio-prereqs
+  namespace: openshift-gitops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dremio
+  source:
+    repoURL: https://github.com/degalasudheer2727/dremio26x.git
+    targetRevision: main
+    path: openshift
+    directory:
+      include: "02-node-tuning-opensearch.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-cluster-node-tuning-operator
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
