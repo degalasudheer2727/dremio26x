@@ -1,0 +1,70 @@
+# -----------------------------------------------------------------------------
+# Dremio 26 on OpenShift - Security Context Constraint (SCC)
+# -----------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------
+# The official Dremio container image runs as a fixed user "dremio" (UID 999,
+# GID 999). OpenShift's default "restricted-v2" SCC forbids a container from
+# choosing its own UID and instead injects a random one. That breaks Dremio,
+# because:
+#   * files written to the RocksDB metadata volume and the distributed-storage
+#     volume must be owned by a consistent user, and
+#   * every Dremio component (coordinator + executors + zookeeper) must agree
+#     on that user.
+#
+# This SCC is a tightly-scoped exception: it allows ONLY the "dremio"
+# ServiceAccount to run as UID/GID 999. It is NOT cluster-wide "anyuid" — it is
+# the least-privilege way to satisfy Dremio's requirement.
+#
+# You MUST be a cluster-admin to create an SCC.
+#
+# Apply with:
+#   oc apply -f openshift/03-scc.yaml
+#
+# Then bind it to the ServiceAccount (done in 04-rbac.yaml, or via:
+#   oc adm policy add-scc-to-user dremio-scc -z dremio -n dremio
+# )
+# -----------------------------------------------------------------------------
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: dremio-scc
+  labels:
+    app.kubernetes.io/part-of: dremio
+# Allow the container to keep the UID/GID baked into the Dremio image.
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegeEscalation: false
+allowPrivilegedContainer: false
+readOnlyRootFilesystem: false
+defaultAddCapabilities: null
+requiredDropCapabilities:
+  - ALL
+allowedCapabilities: null
+runAsUser:
+  # Pin the Dremio image's user. Change 999 only if you use a custom image.
+  type: MustRunAs
+  uid: 999
+seLinuxContext:
+  type: MustRunAs
+fsGroup:
+  type: MustRunAs
+  ranges:
+    - min: 999
+      max: 999
+supplementalGroups:
+  type: RunAsAny
+volumes:
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - persistentVolumeClaim
+  - projected
+  - secret
+# Only the "dremio" ServiceAccount in the "dremio" namespace may use this SCC.
+users:
+  - system:serviceaccount:dremio:dremio
+groups: []

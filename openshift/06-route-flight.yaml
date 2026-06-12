@@ -1,0 +1,41 @@
+# -----------------------------------------------------------------------------
+# Dremio 26 on OpenShift - Route for Arrow Flight SQL (port 32010)
+# -----------------------------------------------------------------------------
+# OPTIONAL. Apply only if you need to reach Arrow Flight SQL from OUTSIDE the
+# cluster (e.g. external BI tools / the Dremio Arrow Flight connector).
+#
+# Arrow Flight is gRPC over HTTP/2. The OpenShift router supports HTTP/2 only on
+# TLS routes, so this Route uses `passthrough` termination: TLS is terminated by
+# Dremio itself, not the router. That means you MUST enable Flight TLS in the
+# Helm values (coordinator.client.ports.flight... / clientEncryption) for this
+# Route to work end to end. If you do not need external Flight access, skip
+# this file and reach Flight in-cluster via the Service DNS name instead.
+#
+# The JDBC/ODBC endpoint (port 31010) is a raw TCP protocol and CANNOT be
+# exposed via an HTTP Route. To reach JDBC from outside the cluster, use a
+# LoadBalancer/NodePort Service or `oc port-forward` (see the install guide).
+#
+# Apply with:
+#   oc apply -f openshift/06-route-flight.yaml
+# -----------------------------------------------------------------------------
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: dremio-flight
+  namespace: dremio
+  labels:
+    app.kubernetes.io/part-of: dremio
+  annotations:
+    # Hint the router to treat the backend as HTTP/2 (gRPC).
+    haproxy.router.openshift.io/balance: "roundrobin"
+spec:
+  to:
+    kind: Service
+    name: dremio-client
+    weight: 100
+  port:
+    targetPort: flight     # named port on the client service (32010)
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: None
+  wildcardPolicy: None

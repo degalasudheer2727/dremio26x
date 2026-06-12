@@ -1,0 +1,150 @@
+# =============================================================================
+# Dremio 26 - MINIMAL OpenShift values override (Helm v3 chart)
+# =============================================================================
+# Chart:  oci://quay.io/dremio/dremio-helm   (Dremio 26+ "v3" chart)
+# Target: a small, single-engine dev/POC cluster on Red Hat OpenShift.
+#
+# HOW THIS FILE IS USED
+# ---------------------
+# This is an OVERRIDE file. You pass it to `helm install`/`helm upgrade` with
+# `--values`. Helm merges it on top of the chart's built-in defaults; you only
+# specify what you want to change.
+#
+#   helm install dremio oci://quay.io/dremio/dremio-helm \
+#       --namespace dremio \
+#       --values helm/values-openshift-minimal.yaml \
+#       --version <CHART_VERSION>
+#
+# ⚠️ AUTHORITATIVE DEFAULTS
+# -------------------------
+# Key names in the v3 chart can change between minor releases. ALWAYS generate
+# the real, version-matched reference for your chart first and diff against it:
+#
+#   helm show values oci://quay.io/dremio/dremio-helm --version <CHART_VERSION> \
+#       > helm/values-reference.generated.yaml
+#
+# If a key below is not present in that generated file, move it under the
+# correct key. The structure here follows the documented Dremio chart layout
+# (coordinator / executor / zookeeper / distStorage / image / serviceAccount).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Container image
+# -----------------------------------------------------------------------------
+# Community/OSS image (no license needed):  dremio/dremio-oss
+# Enterprise image (license required):      quay.io/dremio/dremio-enterprise
+#
+# Pin an explicit X.Y.Z tag. NEVER use "latest" or "X.Y" - a redeploy could pull
+# a newer Dremio and trigger an unplanned, possibly irreversible, upgrade.
+image:
+  registry: docker.io
+  repository: dremio/dremio-oss
+  tag: "26.0.0"            # <-- verify the exact tag on the image registry
+  pullPolicy: IfNotPresent
+  # If you use the enterprise image on quay, create a pull secret first
+  # (see the install guide) and reference it here:
+  # pullSecrets:
+  #   - dremio-pull-secret
+
+# -----------------------------------------------------------------------------
+# ServiceAccount
+# -----------------------------------------------------------------------------
+# Use the ServiceAccount we created in openshift/02-serviceaccount.yaml so the
+# custom SCC (fixed UID 999) applies to every Dremio pod. Do NOT let the chart
+# create its own SA - it would not be bound to our SCC.
+serviceAccount: "dremio"
+# Some chart versions nest this; if `helm show values` shows a block instead,
+# use:
+# serviceAccount:
+#   create: false
+#   name: dremio
+
+# -----------------------------------------------------------------------------
+# Coordinator (the "master" / control + UI node)
+# -----------------------------------------------------------------------------
+# Minimal: ONE coordinator that is also the master. count: 0 means "no extra
+# (secondary) coordinators beyond the master".
+coordinator:
+  cpu: 2
+  memory: 8192            # MiB  (8 Gi) - lower bound that runs comfortably
+  count: 0
+  volumeSize: 32Gi        # RocksDB metadata + local scratch
+  web:
+    port: 9047
+    tls:
+      enabled: false      # TLS terminated at the OpenShift Route (edge) instead
+  client:                 # JDBC / ODBC
+    port: 31010
+    tls:
+      enabled: false
+  flight:                 # Arrow Flight SQL
+    port: 32010
+    tls:
+      enabled: false
+  # Keep pod-level securityContext empty/absent so our SCC supplies UID/GID 999.
+  # Do NOT set runAsUser/fsGroup here on OpenShift.
+
+# -----------------------------------------------------------------------------
+# Executor (the query engine workers)
+# -----------------------------------------------------------------------------
+# Minimal: a single default engine with ONE executor pod.
+executor:
+  cpu: 2
+  memory: 8192            # MiB (8 Gi)
+  count: 1
+  volumeSize: 32Gi
+  engines:
+    - "default"
+  # Cloud cache (C3) accelerates reads from object storage. Disable for the
+  # smallest possible footprint; enable later for performance.
+  cloudCache:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# ZooKeeper (cluster coordination)
+# -----------------------------------------------------------------------------
+# Minimal: a SINGLE ZooKeeper. For production use 3 for quorum/HA.
+zookeeper:
+  image: zookeeper:3.8.4-jre-17
+  count: 1
+  cpu: 0.5
+  memory: 1024            # MiB
+  volumeSize: 8Gi
+
+# -----------------------------------------------------------------------------
+# Distributed storage (REQUIRED in Dremio 21+)
+# -----------------------------------------------------------------------------
+# Dremio needs shared "dist" storage for accelerations/reflections, job results,
+# uploads, and downloads. For a MINIMAL on-cluster setup with no cloud account,
+# use a PVC-backed local volume (type: local). For production, point this at
+# S3 / ADLS Gen2 / GCS instead.
+distStorage:
+  type: "local"
+  local:
+    volumeSize: 64Gi
+  # --- Example: AWS S3 (uncomment and fill in to use object storage) ---------
+  # type: "aws"
+  # aws:
+  #   bucketName: "my-dremio-dist"
+  #   path: "/"
+  #   authentication: "accessKeySecret"   # or "metadata" for IAM roles
+  #   credentials:
+  #     accessKey: "<ACCESS_KEY>"
+  #     secret: "<SECRET_KEY>"
+
+# -----------------------------------------------------------------------------
+# StorageClass
+# -----------------------------------------------------------------------------
+# Leave empty ("") to use the cluster's default StorageClass. Set explicitly if
+# your OpenShift cluster has multiple classes and no default (find them with
+# `oc get storageclass`). The class MUST support ReadWriteOnce dynamic
+# provisioning. For multi-replica distStorage you may need ReadWriteMany.
+storageClass: ""
+
+# -----------------------------------------------------------------------------
+# Extra Dremio config (dremio.conf overrides), optional
+# -----------------------------------------------------------------------------
+# extraStartupArgs: []
+# dremio:
+#   config: |
+#     services.coordinator.master.embedded-zookeeper.enabled: false

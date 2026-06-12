@@ -1,0 +1,21 @@
+# -----------------------------------------------------------------------------
+# Dremio 26 on OpenShift - Project / Namespace
+# -----------------------------------------------------------------------------
+# In OpenShift, a "Project" is a Namespace plus extra metadata. Creating the
+# Namespace object below is equivalent to `oc new-project dremio`, but keeping
+# it as YAML lets us version-control it.
+#
+# Apply with:
+#   oc apply -f openshift/01-namespace.yaml
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dremio
+  labels:
+    app.kubernetes.io/part-of: dremio
+    # This label tells OpenShift monitoring to scrape workloads in this project.
+    openshift.io/cluster-monitoring: "false"
+  annotations:
+    openshift.io/description: "Dremio 26 minimal deployment (Helm v3 chart)"
+    openshift.io/display-name: "Dremio 26"

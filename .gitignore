@@ -1,0 +1,22 @@
+# Generated chart reference (regenerated per chart version)
+helm/values-reference.generated.yaml
+
+# Local secret/value overrides — never commit credentials or licenses
+helm/values-*.local.yaml
+*.local.yaml
+secrets/
+*.key
+*.pem
+kubeconfig
+.env
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Helm packaging artifacts
+*.tgz
+charts/
